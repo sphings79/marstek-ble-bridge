@@ -26,8 +26,13 @@ static const char *TAG = "ws";
 #define WRITE_WITHOUT_RESPONSE 0x00
 #define WRITE_WITH_RESPONSE 0x01
 
+// More than one browser on the same bridge is an obvious thing to want - a phone in the cellar and
+// a desk machine upstairs - and tracking only one meant the second silently stole the first one's
+// place, then took the BLE link down with it when it left.
+#define MAX_CLIENTS 4
+
 static httpd_handle_t s_server = NULL;
-static int s_client_fd = -1;
+static int s_clients[MAX_CLIENTS] = { -1, -1, -1, -1 };
 static SemaphoreHandle_t s_send_lock;
 
 static uint32_t s_sends_ok = 0;
@@ -88,12 +93,35 @@ static void store_binding(const char *address, const char *name)
 
 /* ------------------------------------------------------------------------------ sending out */
 
-static esp_err_t send_frame(httpd_ws_type_t type, const uint8_t *payload, size_t len)
+static int client_count(void)
 {
-    if (s_server == NULL || s_client_fd < 0) {
-        return ESP_ERR_INVALID_STATE;
+    int n = 0;
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (s_clients[i] >= 0) n++;
     }
+    return n;
+}
 
+static bool add_client(int fd)
+{
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (s_clients[i] == fd) return true;
+    }
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (s_clients[i] < 0) { s_clients[i] = fd; return true; }
+    }
+    return false;
+}
+
+static void drop_client(int fd)
+{
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (s_clients[i] == fd) s_clients[i] = -1;
+    }
+}
+
+static esp_err_t send_to(int fd, httpd_ws_type_t type, const uint8_t *payload, size_t len)
+{
     httpd_ws_frame_t frame = {
         .type = type,
         .payload = (uint8_t *) payload,
@@ -103,18 +131,36 @@ static esp_err_t send_frame(httpd_ws_type_t type, const uint8_t *payload, size_t
 
     // The BLE host task and the HTTP task both end up here.
     xSemaphoreTake(s_send_lock, portMAX_DELAY);
-    esp_err_t err = httpd_ws_send_frame_async(s_server, s_client_fd, &frame);
+    esp_err_t err = httpd_ws_send_frame_async(s_server, fd, &frame);
     xSemaphoreGive(s_send_lock);
 
     if (err != ESP_OK) {
         s_sends_failed++;
-        ESP_LOGW(TAG, "Send failed (%s), dropping the client", esp_err_to_name(err));
-        s_client_fd = -1;
+        ESP_LOGW(TAG, "Send to fd %d failed (%s), dropping it", fd, esp_err_to_name(err));
+        drop_client(fd);
     } else {
         s_sends_ok++;
     }
 
     return err;
+}
+
+/** Everything the storage says goes to every browser watching. */
+static esp_err_t send_frame(httpd_ws_type_t type, const uint8_t *payload, size_t len)
+{
+    if (s_server == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t last = ESP_ERR_INVALID_STATE;
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        const int fd = s_clients[i];
+        if (fd >= 0) {
+            last = send_to(fd, type, payload, len);
+        }
+    }
+
+    return last;
 }
 
 static void send_json(cJSON *json)
@@ -179,7 +225,7 @@ static void send_status(ble_state_t state, const char *msg)
     send_json(json);
 }
 
-static void send_hello(void)
+static char *hello_json(void)
 {
     cJSON *json = cJSON_CreateObject();
     cJSON_AddStringToObject(json, "t", "hello");
@@ -194,7 +240,9 @@ static void send_hello(void)
         cJSON_AddNullToObject(json, "bound");
     }
 
-    send_json(json);
+    char *text = cJSON_PrintUnformatted(json);
+    cJSON_Delete(json);
+    return text;
 }
 
 static void send_error(const char *code, const char *msg)
@@ -313,10 +361,22 @@ static esp_err_t ws_pre_handshake(httpd_req_t *req)
 /** The upgrade went through: remember the client and tell it what it is talking to. */
 static esp_err_t ws_post_handshake(httpd_req_t *req)
 {
-    s_client_fd = httpd_req_to_sockfd(req);
-    ESP_LOGI(TAG, "Client connected (fd %d)", s_client_fd);
+    const int fd = httpd_req_to_sockfd(req);
 
-    send_hello();
+    if (!add_client(fd)) {
+        ESP_LOGW(TAG, "Too many clients, refusing fd %d", fd);
+        httpd_sess_trigger_close(s_server, fd);
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "Client connected (fd %d), %d now watching", fd, client_count());
+
+    // Addressed to the newcomer rather than broadcast: the others already know.
+    char *hello = hello_json();
+    if (hello) {
+        send_to(fd, HTTPD_WS_TYPE_TEXT, (const uint8_t *) hello, strlen(hello));
+        cJSON_free(hello);
+    }
     send_status(ble_central_is_connected() ? BLE_STATE_CONNECTED : BLE_STATE_IDLE, NULL);
 
     return ESP_OK;
@@ -361,15 +421,13 @@ static esp_err_t ws_handler(httpd_req_t *req)
 
         case HTTPD_WS_TYPE_CLOSE: {
             const int fd = httpd_req_to_sockfd(req);
-            ESP_LOGI(TAG, "Client on fd %d closed the connection", fd);
+            drop_client(fd);
+            ESP_LOGI(TAG, "Client on fd %d left, %d still watching", fd, client_count());
 
-            // Only the client that currently owns the link may take it down with it. A stale tab
-            // or a probe closing its socket used to tear the BLE connection out from under a
-            // perfectly healthy session - which looked exactly like "connected, but no data".
-            if (fd == s_client_fd) {
-                s_client_fd = -1;
-                // A battery accepts one BLE connection at a time; holding it after the browser has
-                // gone would lock everyone else out, including the vendor app.
+            // Only once nobody is left. A battery accepts one BLE connection at a time, so holding
+            // it after every browser has gone would lock out everything else, including the vendor
+            // app - but dropping it while another tab is still using it was the older mistake.
+            if (client_count() == 0) {
                 ble_central_disconnect();
             }
             break;
@@ -403,7 +461,7 @@ void ws_bridge_stats_json(char *out, size_t len)
              "\"writesOk\":%u,\"writesFailed\":%u,"
              "\"writeAcks\":%u,\"writeRejects\":%u,\"lastWriteError\":%u"
              "},\"ws\":{"
-             "\"clientFd\":%d,\"framesIn\":%u,\"sendsOk\":%u,\"sendsFailed\":%u"
+             "\"clients\":%d,\"framesIn\":%u,\"sendsOk\":%u,\"sendsFailed\":%u"
              "}}",
              b.connected ? "true" : "false",
              b.encrypted ? "true" : "false",
@@ -424,7 +482,7 @@ void ws_bridge_stats_json(char *out, size_t len)
              (unsigned) b.write_acks,
              (unsigned) b.write_rejects,
              (unsigned) b.last_write_error,
-             s_client_fd,
+             client_count(),
              (unsigned) s_frames_in,
              (unsigned) s_sends_ok,
              (unsigned) s_sends_failed);

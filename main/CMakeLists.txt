@@ -9,6 +9,7 @@ idf_component_register(
         "ws_bridge.c"
         "status_led.c"
         "ota_update.c"
+        "boot_guard.c"
     INCLUDE_DIRS "."
     REQUIRES
         esp_http_server

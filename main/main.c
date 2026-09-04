@@ -4,6 +4,7 @@
 #include "freertos/task.h"
 
 #include "auth.h"
+#include "boot_guard.h"
 #include "status_led.h"
 #include "storage.h"
 #include "web_server.h"
@@ -20,6 +21,11 @@ void app_main(void)
     status_led_init();
 
     ESP_ERROR_CHECK(storage_init());
+
+    // Before anything else that could fail: if the previous boot never became reachable, this
+    // goes back to the firmware that did.
+    ESP_ERROR_CHECK(boot_guard_begin());
+
     ESP_ERROR_CHECK(auth_init());
 
     if (wifi_start() != ESP_OK) {
@@ -34,9 +40,13 @@ void app_main(void)
     ESP_ERROR_CHECK(web_server_start());
 
     ESP_LOGI(TAG, "Waiting for network");
-    while (!wifi_is_connected()) {
+
+    // Either route counts as reachable: the fallback access point is a perfectly good way to get
+    // at the bridge, and a router that happens to be down should not send it back a version.
+    while (!wifi_is_connected() && !wifi_fallback_ap_active()) {
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 
+    boot_guard_mark_healthy();
     ESP_LOGI(TAG, "Ready - serving the web app");
 }
