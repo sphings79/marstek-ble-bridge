@@ -23,5 +23,8 @@ idf_component_register(
         json
         esp_driver_gpio
         app_update
+        esp_https_ota
+        esp_http_client
+        esp-tls
         bt
 )
