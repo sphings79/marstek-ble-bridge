@@ -10,6 +10,8 @@
 #include "esp_log.h"
 #include "ota_update.h"
 #include "storage.h"
+#include "wifi.h"
+#include "wifi_setup.h"
 #include "ws_bridge.h"
 
 static const char *TAG = "web";
@@ -79,6 +81,14 @@ static esp_err_t static_file_get(httpd_req_t *req)
     }
 
     if (uri_len == 1 && uri[0] == '/') {
+        // A bridge with no network to join has nothing the app can usefully do, and the app has
+        // no way to say so. Send it to the page that can.
+        if (!wifi_has_credentials()) {
+            httpd_resp_set_status(req, "302 Found");
+            httpd_resp_set_hdr(req, "Location", "/setup");
+            return httpd_resp_send(req, NULL, 0);
+        }
+
         snprintf(path, sizeof(path), "%s/index.html", STORAGE_WEB_ROOT);
     } else {
         snprintf(path, sizeof(path), "%s%.*s", STORAGE_WEB_ROOT, (int) uri_len, uri);
@@ -146,8 +156,8 @@ esp_err_t web_server_start(void)
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.lru_purge_enable = true;
     config.stack_size = 8192;
-    // Default is 8, and the api routes alone are past that now.
-    config.max_uri_handlers = 16;
+    // Default is 8, and the api routes alone are well past that now.
+    config.max_uri_handlers = 24;
 
     httpd_handle_t server = NULL;
     esp_err_t err = httpd_start(&server, &config);
@@ -164,6 +174,7 @@ esp_err_t web_server_start(void)
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &api_bridge));
 
     ESP_ERROR_CHECK(auth_register_handlers(server));
+    ESP_ERROR_CHECK(wifi_setup_register_handlers(server));
     ESP_ERROR_CHECK(ota_update_register_handlers(server));
     ESP_ERROR_CHECK(ws_bridge_start(server));
 

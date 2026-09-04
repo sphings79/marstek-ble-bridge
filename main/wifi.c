@@ -1,20 +1,26 @@
 #include "wifi.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
-#include "esp_mac.h"
 #include "esp_wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
+#include "freertos/task.h"
+#include "nvs.h"
 #include "sdkconfig.h"
 #include "status_led.h"
 
 static const char *TAG = "wifi";
 
-static bool s_connected = false;
-static int s_retries = 0;
+#define NVS_NAMESPACE "bridge"
+#define NVS_KEY_SSID "wifi_ssid"
+#define NVS_KEY_PASSWORD "wifi_pass"
 
 // Back off after a burst of quick retries. A bridge sits next to a battery in a cupboard with
 // nobody watching, so it must keep trying indefinitely rather than give up - but hammering the
@@ -22,9 +28,85 @@ static int s_retries = 0;
 #define WIFI_FAST_RETRIES 5
 #define WIFI_RETRY_DELAY_US (10 * 1000 * 1000)
 
+// Long enough for a slow DHCP server, short enough that someone watching a browser tab does not
+// conclude the board is dead.
+#define WIFI_JOIN_TIMEOUT_MS 20000
+
+#define BIT_CONNECTED BIT0
+#define BIT_FAILED BIT1
+
+static bool s_connected = false;
+static int s_retries = 0;
+static bool s_ap_active = false;
+
+static char s_ssid[WIFI_SSID_MAX];
+static char s_password[WIFI_PASSWORD_MAX];
+static char s_ip[16];
+
+// Whether the credentials in use came from NVS rather than the build. Anything compiled in is
+// copied to NVS on the first successful join, so a later firmware that no longer carries them -
+// every published build - still finds its way onto the network.
+static bool s_from_nvs = false;
+
+// Suppresses the automatic retry while a candidate set of credentials is being tried, so a
+// failure reports back instead of quietly turning into a reconnect loop.
+static volatile bool s_trying = false;
+
+static EventGroupHandle_t s_events;
 static esp_timer_handle_t s_retry_timer;
 static esp_timer_handle_t s_fallback_timer;
-static bool s_ap_active = false;
+
+static void credentials_load(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
+        size_t ssid_len = sizeof(s_ssid);
+        size_t password_len = sizeof(s_password);
+
+        if (nvs_get_str(nvs, NVS_KEY_SSID, s_ssid, &ssid_len) == ESP_OK && s_ssid[0]) {
+            s_from_nvs = true;
+            if (nvs_get_str(nvs, NVS_KEY_PASSWORD, s_password, &password_len) != ESP_OK) {
+                s_password[0] = '\0';
+            }
+        }
+
+        nvs_close(nvs);
+    }
+
+    if (!s_from_nvs) {
+        strlcpy(s_ssid, CONFIG_BRIDGE_WIFI_SSID, sizeof(s_ssid));
+        strlcpy(s_password, CONFIG_BRIDGE_WIFI_PASSWORD, sizeof(s_password));
+    }
+}
+
+static esp_err_t credentials_save(const char *ssid, const char *password)
+{
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = nvs_set_str(nvs, NVS_KEY_SSID, ssid);
+    if (err == ESP_OK) {
+        err = nvs_set_str(nvs, NVS_KEY_PASSWORD, password ? password : "");
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+
+    nvs_close(nvs);
+    return err;
+}
+
+static void apply_station_config(const char *ssid, const char *password)
+{
+    wifi_config_t config = { 0 };
+    strlcpy((char *) config.sta.ssid, ssid, sizeof(config.sta.ssid));
+    strlcpy((char *) config.sta.password, password ? password : "", sizeof(config.sta.password));
+
+    esp_wifi_set_config(WIFI_IF_STA, &config);
+}
 
 /**
  * Open an access point of our own after failing to join the configured network.
@@ -67,8 +149,12 @@ static void start_fallback_ap(void *arg)
     s_ap_active = true;
     status_led_set(STATUS_LED_AP);
 
-    ESP_LOGW(TAG, "No WiFi - serving \"%s\" instead, still retrying \"%s\" in the background",
-             (char *) ap.ap.ssid, CONFIG_BRIDGE_WIFI_SSID);
+    if (s_ssid[0]) {
+        ESP_LOGW(TAG, "No WiFi - serving \"%s\" instead, still retrying \"%s\" in the background",
+                 (char *) ap.ap.ssid, s_ssid);
+    } else {
+        ESP_LOGW(TAG, "No network configured - serving \"%s\" for setup", (char *) ap.ap.ssid);
+    }
 }
 
 static void retry_now(void *arg)
@@ -88,11 +174,20 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
 
     switch (id) {
         case WIFI_EVENT_STA_START:
-            esp_wifi_connect();
+            if (s_ssid[0]) {
+                esp_wifi_connect();
+            }
             break;
 
         case WIFI_EVENT_STA_DISCONNECTED:
             s_connected = false;
+            s_ip[0] = '\0';
+
+            if (s_trying) {
+                xEventGroupSetBits(s_events, BIT_FAILED);
+                break;
+            }
+
             if (!s_ap_active) {
                 status_led_set(STATUS_LED_NO_WIFI);
             }
@@ -125,11 +220,23 @@ static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
 
     s_connected = true;
     s_retries = 0;
+    snprintf(s_ip, sizeof(s_ip), IPSTR, IP2STR(&event->ip_info.ip));
 
     esp_timer_stop(s_fallback_timer);
     status_led_set(STATUS_LED_ONLINE);
+    xEventGroupSetBits(s_events, BIT_CONNECTED);
 
-    ESP_LOGI(TAG, "Connected, address " IPSTR, IP2STR(&event->ip_info.ip));
+    if (!s_from_nvs && s_ssid[0]) {
+        // Credentials that only exist in the build would be lost the moment a published firmware
+        // is installed over this one. Writing them down now keeps that update from stranding a
+        // board that was working a minute earlier.
+        if (credentials_save(s_ssid, s_password) == ESP_OK) {
+            s_from_nvs = true;
+            ESP_LOGI(TAG, "Stored the compiled-in credentials so an update keeps them");
+        }
+    }
+
+    ESP_LOGI(TAG, "Connected, address %s", s_ip);
 }
 
 bool wifi_is_connected(void)
@@ -142,6 +249,21 @@ bool wifi_fallback_ap_active(void)
     return s_ap_active;
 }
 
+bool wifi_has_credentials(void)
+{
+    return s_ssid[0] != '\0';
+}
+
+const char *wifi_ssid(void)
+{
+    return s_ssid;
+}
+
+const char *wifi_ip(void)
+{
+    return s_ip;
+}
+
 int8_t wifi_rssi(void)
 {
     wifi_ap_record_t ap;
@@ -151,12 +273,150 @@ int8_t wifi_rssi(void)
     return ap.rssi;
 }
 
+size_t wifi_scan(wifi_scan_entry_t *out, size_t max)
+{
+    if (!out || max == 0) {
+        return 0;
+    }
+
+    const wifi_scan_config_t scan = { .show_hidden = false };
+    if (esp_wifi_scan_start(&scan, true) != ESP_OK) {
+        return 0;
+    }
+
+    uint16_t found = 0;
+    esp_wifi_scan_get_ap_num(&found);
+    if (found == 0) {
+        return 0;
+    }
+
+    // Bounded rather than sized to the result: this runs on a chip with a Bluetooth stack and an
+    // HTTP server already resident, and nobody picks their network from the 60th entry.
+    if (found > 32) {
+        found = 32;
+    }
+
+    wifi_ap_record_t *records = calloc(found, sizeof(*records));
+    if (!records) {
+        esp_wifi_clear_ap_list();
+        return 0;
+    }
+
+    esp_wifi_scan_get_ap_records(&found, records);
+
+    // Already strongest first, so the first sighting of a name is the one worth keeping - the
+    // rest are the same network seen through another access point or band.
+    size_t written = 0;
+    for (uint16_t i = 0; i < found && written < max; i++) {
+        const char *ssid = (const char *) records[i].ssid;
+        if (!ssid[0]) {
+            continue;
+        }
+
+        bool seen = false;
+        for (size_t j = 0; j < written; j++) {
+            if (strcmp(out[j].ssid, ssid) == 0) {
+                seen = true;
+                break;
+            }
+        }
+        if (seen) {
+            continue;
+        }
+
+        strlcpy(out[written].ssid, ssid, sizeof(out[written].ssid));
+        out[written].rssi = records[i].rssi;
+        out[written].secured = records[i].authmode != WIFI_AUTH_OPEN;
+        written++;
+    }
+
+    free(records);
+    return written;
+}
+
+esp_err_t wifi_provision(const char *ssid, const char *password)
+{
+    if (!ssid || !ssid[0] || strlen(ssid) >= WIFI_SSID_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (password && strlen(password) >= WIFI_PASSWORD_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "Trying \"%s\"", ssid);
+
+    s_trying = true;
+    esp_timer_stop(s_retry_timer);
+    esp_wifi_disconnect();
+
+    // Let the disconnect this just caused pass through the event loop, so the bits cleared below
+    // are not immediately set again by the teardown of the previous association.
+    vTaskDelay(pdMS_TO_TICKS(300));
+
+    apply_station_config(ssid, password);
+    xEventGroupClearBits(s_events, BIT_CONNECTED | BIT_FAILED);
+
+    esp_err_t err = esp_wifi_connect();
+    if (err == ESP_OK) {
+        const EventBits_t bits = xEventGroupWaitBits(
+            s_events, BIT_CONNECTED | BIT_FAILED, pdFALSE, pdFALSE,
+            pdMS_TO_TICKS(WIFI_JOIN_TIMEOUT_MS));
+
+        err = (bits & BIT_CONNECTED) ? ESP_OK : ESP_ERR_WIFI_NOT_CONNECT;
+    }
+
+    s_trying = false;
+
+    if (err == ESP_OK) {
+        strlcpy(s_ssid, ssid, sizeof(s_ssid));
+        strlcpy(s_password, password ? password : "", sizeof(s_password));
+        s_from_nvs = true;
+
+        const esp_err_t saved = credentials_save(s_ssid, s_password);
+        if (saved != ESP_OK) {
+            ESP_LOGE(TAG, "Joined but could not store the credentials: %s", esp_err_to_name(saved));
+        }
+
+        ESP_LOGI(TAG, "Provisioned for \"%s\"", s_ssid);
+        return ESP_OK;
+    }
+
+    ESP_LOGW(TAG, "Could not join \"%s\", keeping the previous settings", ssid);
+
+    apply_station_config(s_ssid, s_password);
+    s_retries = 0;
+    if (s_ssid[0]) {
+        esp_wifi_connect();
+    }
+
+    return err;
+}
+
+esp_err_t wifi_forget(void)
+{
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    nvs_erase_key(nvs, NVS_KEY_SSID);
+    nvs_erase_key(nvs, NVS_KEY_PASSWORD);
+    err = nvs_commit(nvs);
+    nvs_close(nvs);
+
+    ESP_LOGW(TAG, "Credentials forgotten - the next boot opens the setup access point");
+    return err;
+}
+
 esp_err_t wifi_start(void)
 {
-    if (strlen(CONFIG_BRIDGE_WIFI_SSID) == 0) {
-        ESP_LOGE(TAG, "No SSID configured - set one via idf.py menuconfig for now");
-        return ESP_ERR_INVALID_STATE;
+    s_events = xEventGroupCreate();
+    if (!s_events) {
+        return ESP_ERR_NO_MEM;
     }
+
+    credentials_load();
 
     const esp_timer_create_args_t retry_args = {
         .callback = &retry_now,
@@ -183,12 +443,10 @@ esp_err_t wifi_start(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP, &on_got_ip, NULL, NULL));
 
-    wifi_config_t config = { 0 };
-    strlcpy((char *) config.sta.ssid, CONFIG_BRIDGE_WIFI_SSID, sizeof(config.sta.ssid));
-    strlcpy((char *) config.sta.password, CONFIG_BRIDGE_WIFI_PASSWORD, sizeof(config.sta.password));
-
+    // Station mode either way: an unconfigured bridge still needs it to scan for the networks it
+    // is about to be pointed at.
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &config));
+    apply_station_config(s_ssid, s_password);
 
     // The bridge holds a BLE connection and a WebSocket for hours on end, so modem sleep is not
     // what it eventually wants - it adds latency to every relayed frame for a power saving that
@@ -200,15 +458,10 @@ esp_err_t wifi_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 #endif
 
-    ESP_LOGI(TAG, "Joining \"%s\"", CONFIG_BRIDGE_WIFI_SSID);
-
     esp_err_t err = esp_wifi_start();
     if (err != ESP_OK) {
         return err;
     }
-
-    ESP_ERROR_CHECK(esp_timer_start_once(
-        s_fallback_timer, (uint64_t) CONFIG_BRIDGE_FALLBACK_AP_SECONDS * 1000000));
 
     // Only valid once the driver is running. Transmit peaks scale with this, and a board whose
     // supply cannot follow them resets the instant the radio comes up - before anything useful
@@ -218,6 +471,17 @@ esp_err_t wifi_start(void)
     int8_t actual = 0;
     if (esp_wifi_get_max_tx_power(&actual) == ESP_OK) {
         ESP_LOGI(TAG, "Transmit power capped at %d (%.2f dBm)", actual, actual / 4.0);
+    }
+
+    if (s_ssid[0]) {
+        ESP_LOGI(TAG, "Joining \"%s\"", s_ssid);
+        ESP_ERROR_CHECK(esp_timer_start_once(
+            s_fallback_timer, (uint64_t) CONFIG_BRIDGE_FALLBACK_AP_SECONDS * 1000000));
+    } else {
+        // Nothing to wait for. A board fresh off the flasher is only reachable through its own
+        // access point, so it goes up now rather than after a timeout spent joining nothing.
+        ESP_LOGW(TAG, "No credentials stored - opening the setup access point");
+        start_fallback_ap(NULL);
     }
 
     return ESP_OK;

@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Marstek BLE Bridge - Setup</title>
+<style>
+:root{color-scheme:light dark}
+body{margin:0;padding:2rem 1rem;font:16px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;
+ background:#f4f5f7;color:#111}
+@media (prefers-color-scheme:dark){body{background:#14161a;color:#e8eaed}
+ .card{background:#1e2126!important;border-color:#2c3038!important}
+ input,select{background:#14161a!important;color:#e8eaed!important;border-color:#2c3038!important}}
+.card{max-width:26rem;margin:0 auto;background:#fff;border:1px solid #e3e5e8;border-radius:12px;
+ padding:1.5rem;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+h1{margin:0 0 .25rem;font-size:1.25rem}
+p.sub{margin:0 0 1.5rem;color:#6b7280;font-size:.875rem}
+label{display:block;margin:1rem 0 .35rem;font-size:.8125rem;font-weight:600}
+input,select,button{width:100%;box-sizing:border-box;padding:.6rem .7rem;font-size:1rem;
+ border:1px solid #d3d6db;border-radius:8px;background:#fff;color:#111}
+button{margin-top:1.5rem;background:#1976d2;color:#fff;border:0;font-weight:600;cursor:pointer}
+button:disabled{opacity:.6;cursor:default}
+#msg{margin-top:1rem;padding:.7rem;border-radius:8px;font-size:.875rem;display:none}
+.ok{background:#e6f4ea;color:#1e6b34}
+.bad{background:#fde8e6;color:#a1271b}
+@media (prefers-color-scheme:dark){.ok{background:#12301d;color:#8fd6a6}.bad{background:#3a1512;color:#f0a49b}}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Marstek BLE Bridge</h1>
+  <p class="sub">Pick the network the bridge should join.</p>
+
+  <label for="ssid">Network</label>
+  <select id="ssid"><option value="">Scanning...</option></select>
+
+  <label for="manual">Or type a name</label>
+  <input id="manual" placeholder="Hidden or not listed" autocomplete="off">
+
+  <label for="pw">Password</label>
+  <input id="pw" type="password" autocomplete="off">
+
+  <button id="go">Connect</button>
+  <div id="msg"></div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const say = (text, ok) => { const m = $('msg'); m.textContent = text; m.className = ok ? 'ok' : 'bad'; m.style.display = 'block'; };
+
+fetch('api/wifi/scan').then(r => r.json()).then(list => {
+  const sel = $('ssid');
+  sel.innerHTML = '';
+  if (!list.length) { sel.innerHTML = '<option value="">No networks found</option>'; return; }
+  for (const n of list) {
+    const o = document.createElement('option');
+    o.value = n.ssid;
+    o.textContent = n.ssid + '  (' + n.rssi + ' dBm)' + (n.secured ? '' : '  open');
+    sel.appendChild(o);
+  }
+}).catch(() => { $('ssid').innerHTML = '<option value="">Scan failed</option>'; });
+
+$('go').onclick = async () => {
+  const ssid = $('manual').value.trim() || $('ssid').value;
+  if (!ssid) { say('Pick a network first.', false); return; }
+
+  $('go').disabled = true;
+  say('Connecting - this takes up to twenty seconds.', true);
+
+  try {
+    const r = await fetch('api/wifi', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ssid, password: $('pw').value }),
+    });
+    const body = await r.json();
+    if (body.ok) {
+      say('Connected. The bridge is now at http://' + body.ip + '/ - open that from your normal network.', true);
+    } else {
+      say(body.error || 'Could not join that network.', false);
+      $('go').disabled = false;
+    }
+  } catch (e) {
+    say('The bridge stopped answering. If it joined your network it has left this one - try http://marstek-bridge.local/', true);
+  }
+};
+</script>
+</body>
+</html>

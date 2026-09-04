@@ -21,3 +21,9 @@ CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
 CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
 CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
 CONFIG_BT_NIMBLE_ROLE_BROADCASTER=n
+
+# The Improv serial reader pulls the UART driver in, and its interrupt code pushed IRAM over the
+# edge. Keeping the WiFi fast paths in flash instead costs throughput this device never uses: it
+# relays a few hundred bytes a second between a battery and a browser.
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n

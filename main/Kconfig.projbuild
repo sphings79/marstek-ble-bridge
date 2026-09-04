@@ -1,15 +1,20 @@
 menu "Marstek BLE Bridge"
 
     config BRIDGE_WIFI_SSID
-        string "WiFi SSID"
+        string "Fallback WiFi SSID"
         default ""
         help
-            Temporary. Provisioning moves to Improv Serial (entered in the web flasher) with a
-            SoftAP fallback; until that exists, the credentials are compiled in so the firmware
-            can be brought up and tested at all.
+            Only used when nothing has been stored yet. Credentials normally arrive over Improv
+            Serial from the web installer, or through the setup page on the bridge's own access
+            point, and are kept in NVS from then on.
+
+            Leave both empty unless you are flashing your own board by cable and would rather not
+            provision it afterwards. Whatever is set here is copied into NVS on the first
+            successful join, so a later firmware without it still finds the network - and so a
+            published build must never carry one.
 
     config BRIDGE_WIFI_PASSWORD
-        string "WiFi password"
+        string "Fallback WiFi password"
         default ""
 
     config BRIDGE_WIFI_MAX_TX_POWER

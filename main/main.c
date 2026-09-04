@@ -5,6 +5,7 @@
 
 #include "auth.h"
 #include "boot_guard.h"
+#include "improv.h"
 #include "status_led.h"
 #include "storage.h"
 #include "web_server.h"
@@ -29,11 +30,15 @@ void app_main(void)
     ESP_ERROR_CHECK(auth_init());
 
     if (wifi_start() != ESP_OK) {
-        // Without a network the bridge is useless, but it must not reboot in a loop either: a
+        // Without a radio the bridge is useless, but it must not reboot in a loop either: a
         // console message that stays readable is more useful than a crash dump scrolling past.
-        ESP_LOGE(TAG, "WiFi could not be started - configure credentials and reflash");
+        ESP_LOGE(TAG, "WiFi could not be started");
         return;
     }
+
+    // After WiFi, because the first thing it may be asked to do is scan; before the wait below,
+    // because on a board fresh off the flasher this is what ends that wait.
+    improv_start();
 
     // The HTTP server is started regardless of link state; it binds to the interface and starts
     // answering as soon as an address arrives.

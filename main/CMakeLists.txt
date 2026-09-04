@@ -4,6 +4,8 @@ idf_component_register(
         "auth.c"
         "storage.c"
         "wifi.c"
+        "wifi_setup.c"
+        "improv.c"
         "web_server.c"
         "ble_central.c"
         "ws_bridge.c"
@@ -11,6 +13,7 @@ idf_component_register(
         "ota_update.c"
         "boot_guard.c"
     INCLUDE_DIRS "."
+    EMBED_TXTFILES "setup.html"
     REQUIRES
         esp_http_server
         esp_wifi
@@ -22,6 +25,7 @@ idf_component_register(
         mbedtls
         json
         esp_driver_gpio
+        esp_driver_uart
         app_update
         esp_https_ota
         esp_http_client
