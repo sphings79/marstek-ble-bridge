@@ -12,4 +12,24 @@ menu "Marstek BLE Bridge"
         string "WiFi password"
         default ""
 
+    config BRIDGE_WIFI_MAX_TX_POWER
+        int "Maximum WiFi transmit power (0.25 dBm units, 8-84)"
+        range 8 84
+        default 40
+        help
+            Peak current during transmit scales with this. Boards with a weak 5 V supply - the
+            ESP32-CAM family in particular - brown out the moment the radio starts at full power,
+            resetting before anything is logged. 40 is 10 dBm, roughly a tenth of the default
+            output; 84 is the 21 dBm default. Raise it once the supply is known good, because
+            lowering it costs range.
+
+    config BRIDGE_WIFI_POWER_SAVE
+        bool "Allow WiFi modem sleep"
+        default y
+        help
+            Off is what the bridge eventually wants: it holds a BLE link and a WebSocket for hours,
+            and modem sleep adds latency to every relayed frame for a power saving that is
+            irrelevant on a mains-powered device. On when bringing a board up, because the extra
+            current draw is one more thing that can push a marginal supply over the edge.
+
 endmenu

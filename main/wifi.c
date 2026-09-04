@@ -114,11 +114,32 @@ esp_err_t wifi_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &config));
 
-    // The bridge holds a BLE connection and a WebSocket for hours on end; letting WiFi sleep
-    // between beacons adds latency to every relayed frame for a power saving that is irrelevant
-    // on a mains-powered device.
+    // The bridge holds a BLE connection and a WebSocket for hours on end, so modem sleep is not
+    // what it eventually wants - it adds latency to every relayed frame for a power saving that
+    // is irrelevant on a mains-powered device. During bring-up it is on by default, because the
+    // extra draw is one more thing that can tip a marginal supply over.
+#if CONFIG_BRIDGE_WIFI_POWER_SAVE
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MIN_MODEM));
+#else
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+#endif
 
     ESP_LOGI(TAG, "Joining \"%s\"", CONFIG_BRIDGE_WIFI_SSID);
-    return esp_wifi_start();
+
+    esp_err_t err = esp_wifi_start();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    // Only valid once the driver is running. Transmit peaks scale with this, and a board whose
+    // supply cannot follow them resets the instant the radio comes up - before anything useful
+    // reaches the console.
+    ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(CONFIG_BRIDGE_WIFI_MAX_TX_POWER));
+
+    int8_t actual = 0;
+    if (esp_wifi_get_max_tx_power(&actual) == ESP_OK) {
+        ESP_LOGI(TAG, "Transmit power capped at %d (%.2f dBm)", actual, actual / 4.0);
+    }
+
+    return ESP_OK;
 }
