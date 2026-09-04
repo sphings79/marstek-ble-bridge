@@ -142,9 +142,13 @@ static int on_descriptors(uint16_t conn_handle, const struct ble_gatt_error *err
     (void) chr_val_handle;
     (void) arg;
 
-    if (error->status == 0 && dsc &&
+    // Keep the FIRST one found. Discovery runs from the RX value handle upwards to the end of the
+    // table, so later characteristics have configuration descriptors too - overwriting would leave
+    // us enabling notifications on some unrelated characteristic, and nothing would ever arrive.
+    if (error->status == 0 && dsc && s_rx_cccd_handle == 0 &&
         ble_uuid_u16(&dsc->uuid.u) == BLE_GATT_DSC_CLT_CFG_UUID16) {
         s_rx_cccd_handle = dsc->handle;
+        ESP_LOGI(TAG, "Notification descriptor at handle %u", (unsigned) dsc->handle);
         return 0;
     }
 
@@ -310,7 +314,10 @@ static int on_gap_event(struct ble_gap_event *event, void *arg)
             if (len <= sizeof(buf) &&
                 ble_hs_mbuf_to_flat(event->notify_rx.om, buf, sizeof(buf), NULL) == 0 &&
                 s_on_notify) {
+                ESP_LOGD(TAG, "Notification, %u bytes", (unsigned) len);
                 s_on_notify(buf, len);
+            } else {
+                ESP_LOGW(TAG, "Dropped a %u byte notification", (unsigned) len);
             }
             break;
         }
@@ -475,7 +482,12 @@ esp_err_t ble_central_write(const uint8_t *data, size_t len, bool with_response)
         ? ble_gattc_write_flat(s_conn_handle, s_tx_handle, data, len, NULL, NULL)
         : ble_gattc_write_no_rsp_flat(s_conn_handle, s_tx_handle, data, len);
 
-    return rc == 0 ? ESP_OK : ESP_FAIL;
+    if (rc != 0) {
+        ESP_LOGW(TAG, "Write of %u bytes failed: %d", (unsigned) len, rc);
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
 }
 
 /** Remember the name a scan saw, so the app can identify the model without a round trip. */

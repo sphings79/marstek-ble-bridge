@@ -42,4 +42,41 @@ menu "Marstek BLE Bridge"
             standing open indefinitely - taking it over later needs physical access to power-cycle
             it.
 
+    config BRIDGE_FALLBACK_AP_SECONDS
+        int "Seconds without WiFi before opening a fallback access point"
+        range 10 600
+        default 30
+        help
+            A bridge that cannot join the configured network is otherwise mute: it sits wherever
+            the storage sits, with no console attached, and there is no way to ask it what went
+            wrong. After this long it opens its own access point so it can still be reached and
+            reconfigured. It keeps trying to join the real network in the background.
+
+    config BRIDGE_FALLBACK_AP_PASSWORD
+        string "Password of the fallback access point"
+        default "marstek-bridge"
+        help
+            At least 8 characters, or the access point will be open to anyone in range. It only
+            serves the same web interface, which has its own login - but on an unclaimed bridge
+            that login is still up for grabs during the claim window.
+
+    config BRIDGE_STATUS_LED_ENABLED
+        bool "Blink a status LED"
+        default y
+
+    config BRIDGE_STATUS_LED_GPIO
+        int "Status LED GPIO"
+        depends on BRIDGE_STATUS_LED_ENABLED
+        default 33
+        help
+            33 is the small red LED on the AI-Thinker ESP32-CAM. Plain development boards usually
+            put theirs on 2. Check the board before trusting the blink.
+
+    config BRIDGE_STATUS_LED_ACTIVE_LOW
+        bool "Status LED is wired active low"
+        depends on BRIDGE_STATUS_LED_ENABLED
+        default y
+        help
+            True for the ESP32-CAM's red LED, which lights when the pin is pulled low.
+
 endmenu

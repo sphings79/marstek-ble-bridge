@@ -9,6 +9,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "nvs.h"
+#include "wifi.h"
 
 static const char *TAG = "ws";
 
@@ -142,6 +143,13 @@ static void send_status(ble_state_t state, const char *msg)
 
     if (state == BLE_STATE_CONNECTED) {
         cJSON_AddNumberToObject(json, "rssi", ble_central_rssi());
+    }
+
+    // The bridge's own link matters as much as the Bluetooth one: a relayed frame crosses both,
+    // and a weak WiFi side is the harder of the two to notice from the browser.
+    const int8_t wifi = wifi_rssi();
+    if (wifi != 0) {
+        cJSON_AddNumberToObject(json, "wifiRssi", wifi);
     }
     if (msg) {
         cJSON_AddStringToObject(json, "msg", msg);

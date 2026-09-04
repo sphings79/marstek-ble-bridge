@@ -4,6 +4,7 @@
 #include "freertos/task.h"
 
 #include "auth.h"
+#include "status_led.h"
 #include "storage.h"
 #include "web_server.h"
 #include "wifi.h"
@@ -13,6 +14,10 @@ static const char *TAG = "bridge";
 void app_main(void)
 {
     ESP_LOGI(TAG, "Marstek BLE Bridge starting");
+
+    // Before anything that can fail, so the blink itself says "the firmware is running". Silence
+    // then means the board never got this far, which is a different problem entirely.
+    status_led_init();
 
     ESP_ERROR_CHECK(storage_init());
     ESP_ERROR_CHECK(auth_init());
