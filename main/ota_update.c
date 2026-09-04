@@ -4,6 +4,8 @@
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
+#include "esp_partition.h"
+#include "esp_spiffs.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -106,6 +108,82 @@ static esp_err_t update_post(httpd_req_t *req)
     return ESP_OK;
 }
 
+/**
+ * Replace the web partition, which holds the interface the bridge serves.
+ *
+ * Without this the firmware could be updated over the network but the app it serves could not, so
+ * every change to the interface would still mean fetching a cable - which is most of what this
+ * endpoint exists to avoid.
+ *
+ * Unlike the app slots there is no spare copy to write into: the partition is erased first, and
+ * an upload that breaks off leaves the bridge without an interface until the next attempt. The API
+ * keeps working throughout, so a retry is always possible.
+ */
+static esp_err_t update_web_post(httpd_req_t *req)
+{
+    if (!auth_guard(req)) {
+        return ESP_OK;
+    }
+
+    const esp_partition_t *web = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, "web");
+    if (!web) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No web partition");
+        return ESP_FAIL;
+    }
+
+    if (req->content_len <= 0 || (size_t) req->content_len > web->size) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Image does not fit the web partition");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Replacing the web partition with %d bytes", req->content_len);
+
+    // Unmount first: writing underneath a mounted filesystem would leave its cached state lying
+    // about something that no longer exists.
+    esp_vfs_spiffs_unregister("web");
+
+    esp_err_t err = esp_partition_erase_range(web, 0, web->size);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
+        return ESP_FAIL;
+    }
+
+    int offset = 0;
+    int remaining = req->content_len;
+    while (remaining > 0) {
+        const int want = remaining < CHUNK ? remaining : CHUNK;
+        const int got = httpd_req_recv(req, s_buf, want);
+        if (got <= 0) {
+            ESP_LOGE(TAG, "Transfer broke off with %d bytes to go", remaining);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Transfer interrupted");
+            return ESP_FAIL;
+        }
+
+        err = esp_partition_write(web, offset, s_buf, got);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Write failed at %d: %s", offset, esp_err_to_name(err));
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
+            return ESP_FAIL;
+        }
+
+        offset += got;
+        remaining -= got;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true,\"restarting\":true}");
+
+    // Simpler and safer than remounting underneath a running server.
+    const esp_timer_create_args_t args = { .callback = &reboot_soon, .name = "web_reboot" };
+    esp_timer_handle_t timer;
+    if (esp_timer_create(&args, &timer) == ESP_OK) {
+        esp_timer_start_once(timer, 500 * 1000);
+    }
+
+    return ESP_OK;
+}
+
 /** What is running right now, so an update can be checked rather than assumed. */
 static esp_err_t version_get(httpd_req_t *req)
 {
@@ -135,6 +213,16 @@ esp_err_t ota_update_register_handlers(httpd_handle_t server)
         .handler = update_post,
     };
     esp_err_t err = httpd_register_uri_handler(server, &update);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    const httpd_uri_t update_web = {
+        .uri = "/api/update/web",
+        .method = HTTP_POST,
+        .handler = update_web_post,
+    };
+    err = httpd_register_uri_handler(server, &update_web);
     if (err != ESP_OK) {
         return err;
     }
