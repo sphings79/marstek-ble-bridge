@@ -9,6 +9,7 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "storage.h"
+#include "ws_bridge.h"
 
 static const char *TAG = "web";
 
@@ -141,6 +142,7 @@ esp_err_t web_server_start(void)
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &api_bridge));
 
     ESP_ERROR_CHECK(auth_register_handlers(server));
+    ESP_ERROR_CHECK(ws_bridge_start(server));
 
     // Registered last so the API routes above win; the wildcard is the fallback.
     const httpd_uri_t static_files = {

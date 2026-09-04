@@ -5,6 +5,12 @@ CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 
 # HTTP server: the app bundle is served from here, and the byte relay is a WebSocket on it.
 CONFIG_HTTPD_WS_SUPPORT=y
+# The websocket handler is not called for the handshake, so authentication has to happen in the
+# pre-handshake callback - it is the only place that still sees the HTTP request, cookie and all,
+# and can refuse before the upgrade is answered. The post-handshake callback is where a client
+# becomes known to us.
+CONFIG_HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT=y
+CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 
 # Bluetooth: NimBLE only, and only as a central - the bridge connects out to the storage and

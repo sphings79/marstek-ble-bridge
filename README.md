@@ -40,7 +40,7 @@ no certificate warnings, nothing to configure.
 | Web partition, static file serving, `/api/bridge` | ✅ |
 | WiFi | ⚠️ credentials compiled in via `menuconfig` - temporary |
 | Authentication, claim window | ✅ verified end to end on hardware |
-| BLE central and the byte relay | ⬜ |
+| BLE central and the byte relay | ⚠️ implemented, not yet exercised against a storage |
 | Improv Serial provisioning, SoftAP fallback | ⬜ |
 | Web installer | ⬜ |
 

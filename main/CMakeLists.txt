@@ -5,6 +5,8 @@ idf_component_register(
         "storage.c"
         "wifi.c"
         "web_server.c"
+        "ble_central.c"
+        "ws_bridge.c"
     INCLUDE_DIRS "."
     REQUIRES
         esp_http_server
@@ -16,4 +18,5 @@ idf_component_register(
         spiffs
         mbedtls
         json
+        bt
 )
