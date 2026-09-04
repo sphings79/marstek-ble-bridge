@@ -4,7 +4,7 @@
 
 **Dein Marstek-Venus-Speicher im Netzwerk — ohne Cloud, ohne App, ohne neben der Batterie zu stehen.**
 
-[![Im Browser flashen](https://img.shields.io/badge/⚡_Im_Browser_flashen-1976d2?style=for-the-badge)](https://sphings-dev.de/marstek/bridge/)
+[![Im Browser flashen](https://img.shields.io/badge/⚡_Im_Browser_flashen-1976d2?style=for-the-badge)](https://sphings79.github.io/marstek-ble-bridge/)
 
 [![ESP32](https://img.shields.io/badge/ESP32-WROOM--32%20·%20S3-E7352C?style=flat-square)](#hardware)
 [![ESP-IDF](https://img.shields.io/badge/ESP--IDF-v5.5-blue?style=flat-square)](#selbst-bauen)
@@ -56,7 +56,7 @@ einer Sprache.
 
 ## Loslegen
 
-1. **Flashen** über den [Web-Installer](https://sphings-dev.de/marstek/bridge/) — Chrome oder Edge,
+1. **Flashen** über den [Web-Installer](https://sphings79.github.io/marstek-ble-bridge/) — Chrome oder Edge,
    nichts zu installieren. Er fragt das WLAN über dasselbe Kabel ab, über das er gerade geflasht
    hat, und nennt dir danach die Adresse, unter der die Bridge gelandet ist.
 2. **Adresse öffnen** und ein Passwort setzen. Das geht nur in den ersten zehn Minuten nach dem

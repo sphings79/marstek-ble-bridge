@@ -4,7 +4,7 @@
 
 **Your Marstek Venus storage, on the network — without the cloud, without an app, without standing next to the battery.**
 
-[![Flash it in your browser](https://img.shields.io/badge/⚡_Flash_it_in_your_browser-1976d2?style=for-the-badge)](https://sphings-dev.de/marstek/bridge/)
+[![Flash it in your browser](https://img.shields.io/badge/⚡_Flash_it_in_your_browser-1976d2?style=for-the-badge)](https://sphings79.github.io/marstek-ble-bridge/)
 
 [![ESP32](https://img.shields.io/badge/ESP32-WROOM--32%20·%20S3-E7352C?style=flat-square)](#hardware)
 [![ESP-IDF](https://img.shields.io/badge/ESP--IDF-v5.5-blue?style=flat-square)](#build-it-yourself)
@@ -55,7 +55,7 @@ detail stays in the web app, where it is already maintained, in one place, in on
 
 ## Getting started
 
-1. **Flash it** from [the web installer](https://sphings-dev.de/marstek/bridge/) — Chrome or Edge,
+1. **Flash it** from [the web installer](https://sphings79.github.io/marstek-ble-bridge/) — Chrome or Edge,
    nothing to install. It asks for your WiFi over the same cable it just flashed through, then
    hands you the address the bridge ended up at.
 2. **Open that address** and set a password. Only possible in the first ten minutes after boot, so
