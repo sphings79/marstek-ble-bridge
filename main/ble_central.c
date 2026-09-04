@@ -45,6 +45,7 @@ static int8_t s_rssi = 0;
 
 static ble_addr_t s_target_addr;
 static bool s_have_target = false;
+static bool s_connect_pending = false;
 
 static ble_device_t s_scan_results[MAX_SCAN_RESULTS];
 static size_t s_scan_count = 0;
@@ -63,7 +64,7 @@ static void addr_to_str(const ble_addr_t *addr, char *out)
              v[5], v[4], v[3], v[2], v[1], v[0]);
 }
 
-static bool str_to_addr(const char *str, ble_addr_t *out)
+static bool str_to_addr(const char *str, uint8_t type, ble_addr_t *out)
 {
     unsigned v[6];
     if (sscanf(str, "%x:%x:%x:%x:%x:%x", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) {
@@ -73,8 +74,7 @@ static bool str_to_addr(const char *str, ble_addr_t *out)
     for (int i = 0; i < 6; i++) {
         out->val[i] = (uint8_t) v[5 - i];
     }
-    // Marstek storages advertise with a public address; NimBLE needs the type spelled out.
-    out->type = BLE_ADDR_PUBLIC;
+    out->type = type;
 
     return true;
 }
@@ -253,6 +253,7 @@ static void remember_scan_result(const struct ble_gap_disc_desc *desc)
     }
 
     ble_device_t *entry = &s_scan_results[s_scan_count++];
+    entry->addr_type = desc->addr.type;
     size_t name_len = fields.name_len < BLE_NAME_MAX - 1 ? fields.name_len : BLE_NAME_MAX - 1;
     memcpy(entry->name, fields.name, name_len);
     entry->name[name_len] = '\0';
@@ -277,10 +278,13 @@ static int on_gap_event(struct ble_gap_event *event, void *arg)
                 s_on_scan(s_scan_results, s_scan_count);
                 s_on_scan = NULL;
             }
-            set_state(BLE_STATE_IDLE, NULL);
+            // Reporting idle here would tell the app the storage had gone away, when all that
+            // finished was a scan running alongside a perfectly good connection.
+            set_state(ble_central_is_connected() ? BLE_STATE_CONNECTED : BLE_STATE_IDLE, NULL);
             break;
 
         case BLE_GAP_EVENT_CONNECT:
+            s_connect_pending = false;
             if (event->connect.status != 0) {
                 ESP_LOGE(TAG, "Connection failed: %d", event->connect.status);
                 s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
@@ -299,6 +303,7 @@ static int on_gap_event(struct ble_gap_event *event, void *arg)
             break;
 
         case BLE_GAP_EVENT_DISCONNECT:
+            s_connect_pending = false;
             ESP_LOGI(TAG, "Disconnected, reason 0x%x", event->disconnect.reason);
             s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
             s_tx_handle = s_rx_handle = s_rx_cccd_handle = 0;
@@ -407,13 +412,48 @@ esp_err_t ble_central_scan(uint32_t seconds, ble_scan_cb_t on_result)
     return ESP_OK;
 }
 
-esp_err_t ble_central_connect(const char *address)
+uint8_t ble_central_addr_type_for(const char *address)
+{
+    for (size_t i = 0; i < s_scan_count; i++) {
+        if (strcmp(s_scan_results[i].address, address) == 0) {
+            return s_scan_results[i].addr_type;
+        }
+    }
+    return BLE_ADDR_TYPE_UNKNOWN;
+}
+
+esp_err_t ble_central_connect(const char *address, uint8_t addr_type)
 {
     if (!s_host_ready) {
+        ESP_LOGW(TAG, "Cannot connect: Bluetooth host not ready yet");
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (!str_to_addr(address, &s_target_addr)) {
+    // Pressing connect twice is the normal thing to do when the first press seems to do nothing.
+    // A second ble_gap_connect while one is outstanding just fails, so treat the repeat as a
+    // no-op rather than turning it into an error the user has to interpret.
+    if (s_connect_pending) {
+        ESP_LOGI(TAG, "Connection attempt already running, ignoring the repeat");
+        return ESP_OK;
+    }
+
+    if (ble_central_is_connected()) {
+        ESP_LOGI(TAG, "Already connected");
+        set_state(BLE_STATE_CONNECTED, NULL);
+        return ESP_OK;
+    }
+
+    if (addr_type == BLE_ADDR_TYPE_UNKNOWN) {
+        addr_type = ble_central_addr_type_for(address);
+    }
+    if (addr_type == BLE_ADDR_TYPE_UNKNOWN) {
+        // Nothing better to go on. Public is the common case, but say so - if the connection
+        // fails, this is the first thing to suspect.
+        ESP_LOGW(TAG, "No address type known for %s, assuming public", address);
+        addr_type = BLE_ADDR_PUBLIC;
+    }
+
+    if (!str_to_addr(address, addr_type, &s_target_addr)) {
         return ESP_ERR_INVALID_ARG;
     }
     s_have_target = true;
@@ -429,10 +469,19 @@ esp_err_t ble_central_connect(const char *address)
     strlcpy(s_device_address, address, sizeof(s_device_address));
     set_state(BLE_STATE_CONNECTING, NULL);
 
+    s_connect_pending = true;
+
     int rc = ble_gap_connect(own_addr_type, &s_target_addr, 10000, NULL, on_gap_event, NULL);
     if (rc != 0) {
+        s_connect_pending = false;
         ESP_LOGE(TAG, "Connection could not be started: %d", rc);
-        set_state(BLE_STATE_ERROR, "Connection could not be started");
+
+        // The numeric reason travels to the browser too. Without it the only place it exists is a
+        // serial console, which is exactly what a bridge in a cellar does not have.
+        char msg[80];
+        snprintf(msg, sizeof(msg), "Could not start connecting (NimBLE error %d, address type %u)",
+                 rc, (unsigned) addr_type);
+        set_state(BLE_STATE_ERROR, msg);
         return ESP_FAIL;
     }
 

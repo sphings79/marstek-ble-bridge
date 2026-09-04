@@ -16,6 +16,7 @@ static const char *TAG = "ws";
 #define NVS_NAMESPACE "bridge"
 #define NVS_KEY_BOUND_ADDR "bound_addr"
 #define NVS_KEY_BOUND_NAME "bound_name"
+#define NVS_KEY_BOUND_TYPE "bound_type"
 
 // Outbound binary frames are BLE notifications, which never exceed the negotiated MTU. The inbound
 // direction carries one extra prefix byte.
@@ -31,6 +32,7 @@ static SemaphoreHandle_t s_send_lock;
 
 static char s_bound_addr[BLE_ADDR_STR_LEN];
 static char s_bound_name[BLE_NAME_MAX];
+static uint8_t s_bound_type = BLE_ADDR_TYPE_UNKNOWN;
 
 static void load_binding(void)
 {
@@ -49,6 +51,12 @@ static void load_binding(void)
         s_bound_name[0] = '\0';
     }
 
+    // Remembered from the scan that bound this device. Without it a reconnect after a reboot would
+    // have to guess, and guessing wrong means the connection never starts.
+    if (nvs_get_u8(nvs, NVS_KEY_BOUND_TYPE, &s_bound_type) != ESP_OK) {
+        s_bound_type = BLE_ADDR_TYPE_UNKNOWN;
+    }
+
     nvs_close(nvs);
 
     if (s_bound_addr[0]) {
@@ -60,6 +68,7 @@ static void store_binding(const char *address, const char *name)
 {
     strlcpy(s_bound_addr, address, sizeof(s_bound_addr));
     strlcpy(s_bound_name, name ? name : "", sizeof(s_bound_name));
+    s_bound_type = ble_central_addr_type_for(address);
 
     nvs_handle_t nvs;
     if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs) != ESP_OK) {
@@ -68,6 +77,7 @@ static void store_binding(const char *address, const char *name)
 
     nvs_set_str(nvs, NVS_KEY_BOUND_ADDR, s_bound_addr);
     nvs_set_str(nvs, NVS_KEY_BOUND_NAME, s_bound_name);
+    nvs_set_u8(nvs, NVS_KEY_BOUND_TYPE, s_bound_type);
     nvs_commit(nvs);
     nvs_close(nvs);
 }
@@ -234,7 +244,9 @@ static void handle_control(const char *text, size_t len)
     if (strcmp(type->valuestring, "connect") == 0) {
         if (!s_bound_addr[0]) {
             send_error("not_bound", "No storage selected yet");
-        } else if (ble_central_connect(s_bound_addr) != ESP_OK) {
+        } else if (ble_central_connect(s_bound_addr, s_bound_type) != ESP_OK) {
+            // The reason already went out as an error status carrying the NimBLE code; this is
+            // only the coarse signal that the attempt did not get off the ground.
             send_error("connect_failed", "Could not start connecting");
         }
 
@@ -335,13 +347,21 @@ static esp_err_t ws_handler(httpd_req_t *req)
             }
             break;
 
-        case HTTPD_WS_TYPE_CLOSE:
-            ESP_LOGI(TAG, "Client closed the connection");
-            s_client_fd = -1;
-            // A battery accepts one BLE connection at a time; holding it after the browser has
-            // gone would lock everyone else out, including the vendor app.
-            ble_central_disconnect();
+        case HTTPD_WS_TYPE_CLOSE: {
+            const int fd = httpd_req_to_sockfd(req);
+            ESP_LOGI(TAG, "Client on fd %d closed the connection", fd);
+
+            // Only the client that currently owns the link may take it down with it. A stale tab
+            // or a probe closing its socket used to tear the BLE connection out from under a
+            // perfectly healthy session - which looked exactly like "connected, but no data".
+            if (fd == s_client_fd) {
+                s_client_fd = -1;
+                // A battery accepts one BLE connection at a time; holding it after the browser has
+                // gone would lock everyone else out, including the vendor app.
+                ble_central_disconnect();
+            }
             break;
+        }
 
         default:
             break;

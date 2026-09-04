@@ -11,8 +11,14 @@
 typedef struct {
     char name[BLE_NAME_MAX];
     char address[BLE_ADDR_STR_LEN];
+    /* NimBLE address type. Connecting needs it, and guessing "public" fails outright on a device
+       that advertises a random address. */
+    uint8_t addr_type;
     int8_t rssi;
 } ble_device_t;
+
+/** Stand-in for "the type is not known", so the caller can fall back rather than guess silently. */
+#define BLE_ADDR_TYPE_UNKNOWN 0xFF
 
 typedef enum {
     BLE_STATE_IDLE,
@@ -37,8 +43,15 @@ esp_err_t ble_central_init(ble_notify_cb_t on_notify, ble_state_cb_t on_state);
 /** Look for storages in range. Results arrive via the callback when the scan ends. */
 esp_err_t ble_central_scan(uint32_t seconds, ble_scan_cb_t on_result);
 
-/** Connect to a device by address, discover the Marstek service and subscribe to notifications. */
-esp_err_t ble_central_connect(const char *address);
+/**
+ * Connect to a device by address, discover the Marstek service and subscribe to notifications.
+ *
+ * Pass BLE_ADDR_TYPE_UNKNOWN to have the type looked up in the last scan results.
+ */
+esp_err_t ble_central_connect(const char *address, uint8_t addr_type);
+
+/** Address type the last scan saw for this address, or BLE_ADDR_TYPE_UNKNOWN. */
+uint8_t ble_central_addr_type_for(const char *address);
 
 void ble_central_disconnect(void);
 
