@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Marstek BLE Bridge — Web Installer</title>
+<meta name="description" content="Flash the Marstek BLE Bridge onto an ESP32 straight from your browser. No cloud, no app, no toolchain.">
+<style>
+:root{
+  color-scheme:light dark;
+  --bg:#f4f5f7; --card:#fff; --line:#e3e5e8; --text:#111827; --dim:#6b7280;
+  --accent:#1976d2; --accent-text:#fff; --code:#eef0f3;
+}
+@media (prefers-color-scheme:dark){
+  :root{--bg:#14161a; --card:#1e2126; --line:#2c3038; --text:#e8eaed; --dim:#9aa0a6;
+        --accent:#4f9df5; --accent-text:#0b1220; --code:#22262d;}
+}
+*{box-sizing:border-box}
+body{margin:0;padding:3rem 1.25rem 4rem;background:var(--bg);color:var(--text);
+ font:16px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:44rem;margin:0 auto}
+header{text-align:center;margin-bottom:2.5rem}
+h1{margin:0 0 .5rem;font-size:2rem;letter-spacing:-.02em}
+.tagline{margin:0;color:var(--dim);font-size:1.0625rem}
+.langs{display:flex;justify-content:center;gap:.5rem;margin-bottom:2rem}
+.langs button{border:1px solid var(--line);background:var(--card);color:var(--dim);
+ padding:.3rem .8rem;border-radius:999px;font:inherit;font-size:.8125rem;cursor:pointer}
+.langs button[aria-pressed="true"]{background:var(--accent);color:var(--accent-text);border-color:var(--accent)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:1.75rem;
+ margin-bottom:1.25rem}
+.install{text-align:center}
+esp-web-install-button{--esp-tools-button-color:var(--accent-text);
+ --esp-tools-button-text-color:var(--accent);display:block}
+.unsupported{color:var(--dim);font-size:.9375rem}
+h2{font-size:1.0625rem;margin:0 0 .85rem}
+ol{margin:0;padding-left:1.35rem}
+ol li{margin-bottom:.6rem}
+ol li:last-child{margin-bottom:0}
+code{background:var(--code);padding:.1rem .35rem;border-radius:5px;font-size:.875em}
+.note{font-size:.9375rem;color:var(--dim);margin:.85rem 0 0}
+footer{text-align:center;color:var(--dim);font-size:.875rem;margin-top:2.5rem}
+footer a{color:var(--accent);text-decoration:none}
+footer a:hover{text-decoration:underline}
+.coffee{display:inline-block;margin-top:1.25rem}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<main>
+
+<div class="langs">
+  <button id="btn-en" aria-pressed="true">English</button>
+  <button id="btn-de" aria-pressed="false">Deutsch</button>
+</div>
+
+<header>
+  <h1>Marstek BLE Bridge</h1>
+  <p class="tagline" data-en="Put your Venus storage on the network. Flash it here, in this browser."
+     data-de="Deinen Venus-Speicher ins Netzwerk holen. Hier flashen, direkt im Browser.">
+     Put your Venus storage on the network. Flash it here, in this browser.</p>
+</header>
+
+<div class="card install">
+  <esp-web-install-button manifest="manifest.json">
+    <button slot="activate" style="font:inherit;font-weight:600;padding:.85rem 2rem;border:0;
+      border-radius:10px;background:var(--accent);color:var(--accent-text);cursor:pointer"
+      data-en="Connect and install" data-de="Verbinden und installieren">Connect and install</button>
+    <span slot="unsupported" class="unsupported"
+      data-en="This browser cannot talk to serial ports. Use Chrome or Edge on a desktop."
+      data-de="Dieser Browser kann nicht auf serielle Ports zugreifen. Chrome oder Edge am Rechner nutzen."
+      >This browser cannot talk to serial ports. Use Chrome or Edge on a desktop.</span>
+    <span slot="not-allowed" class="unsupported"
+      data-en="Serial access needs a secure connection. Open this page over https."
+      data-de="Serieller Zugriff braucht eine sichere Verbindung. Diese Seite über https öffnen."
+      >Serial access needs a secure connection. Open this page over https.</span>
+  </esp-web-install-button>
+</div>
+
+<div class="card">
+  <h2 data-en="How it goes" data-de="Wie es abläuft">How it goes</h2>
+  <ol id="steps"></ol>
+  <p class="note" id="note"></p>
+</div>
+
+<div class="card">
+  <h2 data-en="What you need" data-de="Was du brauchst">What you need</h2>
+  <ol id="needs"></ol>
+</div>
+
+<footer>
+  <p>
+    <a href="https://github.com/sphings79/marstek-ble-bridge">Source &amp; documentation</a> ·
+    <a href="https://github.com/sphings79/marstek-ble-control">Marstek BLE Control</a> ·
+    <a href="https://sphings-dev.de/">More tools</a>
+  </p>
+  <p data-en="Unofficial project. Not affiliated with Marstek."
+     data-de="Inoffizielles Projekt. Nicht mit Marstek verbunden.">Unofficial project. Not affiliated with Marstek.</p>
+  <a class="coffee" href="https://buymeacoffee.com/sphings">
+    <img alt="Buy Me A Coffee" src="https://img.shields.io/badge/Buy%20Me%20A%20Coffee-sphings-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=000000">
+  </a>
+</footer>
+
+</main>
+
+<script type="module" src="https://unpkg.com/esp-web-tools@10.4.0/dist/web/install-button.js?module"></script>
+<script>
+const CONTENT = {
+  en: {
+    steps: [
+      'Plug the ESP32 into this computer with a data USB cable — a charge-only cable will not show up.',
+      'Press <strong>Connect and install</strong> and pick the serial port. Installing takes a couple of minutes.',
+      'When it asks, give it your WiFi. It hands back the address the bridge ended up at.',
+      'Open that address, set a password, then pick your storage from the scan.',
+    ],
+    note: 'Boards without an auto-reset circuit — most ESP32-CAM modules — need GPIO0 tied to GND while you press reset, before you hit Connect.',
+    needs: [
+      'An ESP32 with 4 MB of flash: a WROOM-32 development board, or an ESP32-S3.',
+      'Chrome or Edge on a desktop. Firefox and Safari have no Web Serial.',
+      'A spot for it within Bluetooth range of the storage, and within WiFi range of your access point.',
+    ],
+  },
+  de: {
+    steps: [
+      'ESP32 mit einem Daten-USB-Kabel an diesen Rechner stecken — ein reines Ladekabel taucht nicht auf.',
+      '<strong>Verbinden und installieren</strong> drücken und den seriellen Port auswählen. Das Installieren dauert ein paar Minuten.',
+      'Wenn danach gefragt wird: dein WLAN eintragen. Du bekommst die Adresse zurück, unter der die Bridge gelandet ist.',
+      'Diese Adresse öffnen, ein Passwort setzen, dann deinen Speicher aus der Liste wählen.',
+    ],
+    note: 'Boards ohne Auto-Reset — die meisten ESP32-CAM-Module — brauchen GPIO0 auf GND, während du Reset drückst, bevor du auf Verbinden gehst.',
+    needs: [
+      'Einen ESP32 mit 4 MB Flash: ein WROOM-32-Entwicklungsboard oder einen ESP32-S3.',
+      'Chrome oder Edge am Rechner. Firefox und Safari können kein Web Serial.',
+      'Einen Platz in Bluetooth-Reichweite des Speichers und in WLAN-Reichweite deines Accesspoints.',
+    ],
+  },
+};
+
+const fill = (id, items) => {
+  document.getElementById(id).innerHTML = items.map((t) => '<li>' + t + '</li>').join('');
+};
+
+function setLanguage(lang) {
+  document.documentElement.lang = lang;
+  for (const el of document.querySelectorAll('[data-' + lang + ']')) {
+    el.innerHTML = el.dataset[lang];
+  }
+  fill('steps', CONTENT[lang].steps);
+  fill('needs', CONTENT[lang].needs);
+  document.getElementById('note').textContent = CONTENT[lang].note;
+  document.getElementById('btn-en').setAttribute('aria-pressed', String(lang === 'en'));
+  document.getElementById('btn-de').setAttribute('aria-pressed', String(lang === 'de'));
+  try { localStorage.setItem('lang', lang); } catch (e) { /* private window */ }
+}
+
+document.getElementById('btn-en').onclick = () => setLanguage('en');
+document.getElementById('btn-de').onclick = () => setLanguage('de');
+
+let initial = 'en';
+try { initial = localStorage.getItem('lang') || (navigator.language.startsWith('de') ? 'de' : 'en'); }
+catch (e) { initial = navigator.language.startsWith('de') ? 'de' : 'en'; }
+setLanguage(initial);
+</script>
+</body>
+</html>

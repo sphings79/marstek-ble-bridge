@@ -1,0 +1,33 @@
+{
+  "name": "Marstek BLE Bridge",
+  "version": "1.0.0",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "improv": true,
+      "parts": [
+        {
+          "path": "firmware/bootloader.bin",
+          "offset": 4096
+        },
+        {
+          "path": "firmware/partition-table.bin",
+          "offset": 32768
+        },
+        {
+          "path": "firmware/ota_data_initial.bin",
+          "offset": 61440
+        },
+        {
+          "path": "firmware/marstek-ble-bridge.bin",
+          "offset": 131072
+        },
+        {
+          "path": "firmware/web.bin",
+          "offset": 3276800
+        }
+      ]
+    }
+  ]
+}
