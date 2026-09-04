@@ -8,6 +8,7 @@ idf_component_register(
         "ble_central.c"
         "ws_bridge.c"
         "status_led.c"
+        "ota_update.c"
     INCLUDE_DIRS "."
     REQUIRES
         esp_http_server
@@ -20,5 +21,6 @@ idf_component_register(
         mbedtls
         json
         esp_driver_gpio
+        app_update
         bt
 )

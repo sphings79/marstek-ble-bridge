@@ -1,11 +1,16 @@
 # ESP32/ESP32-S3 with 4 MB flash.
 #
-# One app partition, no OTA slots: two app copies plus the web partition do not fit in 4 MB, and
-# the bridge is updated through the web flasher anyway. If self-update is ever wanted, it needs an
-# 8 MB module rather than a rearrangement of this table.
+# Two app slots so the bridge can update itself over WiFi. It lives wherever the storage lives,
+# which is rarely next to a computer, and every firmware change otherwise means fetching a cable.
+#
+# The room comes from the web partition: the app bundle is stored gzipped and without the
+# Web Bluetooth help image, which the bridge never shows - in bridge mode the browser talks to us
+# over the network and never touches its own Bluetooth. That takes ~1 MB down to ~210 KB.
 #
 # Name,     Type, SubType, Offset,   Size,     Flags
 nvs,        data, nvs,     0x9000,   0x6000,
-phy_init,   data, phy,     0xf000,   0x1000,
-factory,    app,  factory, 0x10000,  0x200000,
-web,        data, spiffs,  0x210000, 0x1E0000,
+otadata,    data, ota,     0xf000,   0x2000,
+phy_init,   data, phy,     0x11000,  0x1000,
+ota_0,      app,  ota_0,   0x20000,  0x180000,
+ota_1,      app,  ota_1,   0x1A0000, 0x180000,
+web,        data, spiffs,  0x320000, 0xE0000,

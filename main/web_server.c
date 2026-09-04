@@ -8,6 +8,7 @@
 #include "auth.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "ota_update.h"
 #include "storage.h"
 #include "ws_bridge.h"
 
@@ -83,11 +84,26 @@ static esp_err_t static_file_get(httpd_req_t *req)
         snprintf(path, sizeof(path), "%s%.*s", STORAGE_WEB_ROOT, (int) uri_len, uri);
     }
 
+    // Everything in the web partition is stored gzipped, because two OTA slots leave little room
+    // for a megabyte of uncompressed bundle. The browser unpacks it; the ESP32 only has to hand
+    // over the bytes, which is also a good deal quicker over WiFi.
+    bool gzipped = false;
     struct stat info;
+
     if (stat(path, &info) != 0) {
-        ESP_LOGW(TAG, "Not found: %s", path);
-        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Not found");
-        return ESP_FAIL;
+        char packed[sizeof(path) + 4];
+        snprintf(packed, sizeof(packed), "%s.gz", path);
+
+        if (stat(packed, &info) != 0) {
+            ESP_LOGW(TAG, "Not found: %s", path);
+            httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Not found");
+            return ESP_FAIL;
+        }
+
+        gzipped = true;
+        // Content type still comes from the name without .gz - the encoding is separate from what
+        // the file actually is.
+        strlcpy(path, packed, sizeof(path));
     }
 
     FILE *file = fopen(path, "r");
@@ -96,6 +112,10 @@ static esp_err_t static_file_get(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    if (gzipped) {
+        path[strlen(path) - 3] = '\0';   /* drop ".gz" before deciding the type */
+        httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    }
     httpd_resp_set_type(req, content_type_for(path));
 
     // The bundle filename carries a content hash, so it can be cached hard. index.html must not
@@ -126,6 +146,8 @@ esp_err_t web_server_start(void)
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.lru_purge_enable = true;
     config.stack_size = 8192;
+    // Default is 8, and the api routes alone are past that now.
+    config.max_uri_handlers = 16;
 
     httpd_handle_t server = NULL;
     esp_err_t err = httpd_start(&server, &config);
@@ -142,6 +164,7 @@ esp_err_t web_server_start(void)
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &api_bridge));
 
     ESP_ERROR_CHECK(auth_register_handlers(server));
+    ESP_ERROR_CHECK(ota_update_register_handlers(server));
     ESP_ERROR_CHECK(ws_bridge_start(server));
 
     // Registered last so the API routes above win; the wildcard is the fallback.
