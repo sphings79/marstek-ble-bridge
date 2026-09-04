@@ -5,6 +5,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include "auth.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "storage.h"
@@ -45,11 +46,12 @@ static const char *content_type_for(const char *path)
  */
 static esp_err_t api_bridge_get(httpd_req_t *req)
 {
-    // TODO: claimed/authenticated become real once the auth module lands. Reporting "no password
-    // set" is the truthful answer for a bridge that cannot check one yet.
-    const char *body =
-        "{\"bridge\":\"marstek-ble-control\",\"version\":1,"
-        "\"claimed\":false,\"authenticated\":false}";
+    char body[128];
+    snprintf(body, sizeof(body),
+             "{\"bridge\":\"marstek-ble-control\",\"version\":1,"
+             "\"claimed\":%s,\"authenticated\":%s}",
+             auth_is_claimed() ? "true" : "false",
+             auth_request_is_authenticated(req) ? "true" : "false");
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -137,6 +139,8 @@ esp_err_t web_server_start(void)
         .handler = api_bridge_get,
     };
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &api_bridge));
+
+    ESP_ERROR_CHECK(auth_register_handlers(server));
 
     // Registered last so the API routes above win; the wildcard is the fallback.
     const httpd_uri_t static_files = {

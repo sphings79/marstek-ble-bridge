@@ -32,4 +32,14 @@ menu "Marstek BLE Bridge"
             irrelevant on a mains-powered device. On when bringing a board up, because the extra
             current draw is one more thing that can push a marginal supply over the edge.
 
+    config BRIDGE_CLAIM_WINDOW_MINUTES
+        int "Minutes after boot during which the bridge can be claimed"
+        range 1 1440
+        default 10
+        help
+            A freshly flashed bridge has no password, and whoever reaches it first sets one.
+            Bounding that to the first few minutes means one left powered on and unclaimed is not
+            standing open indefinitely - taking it over later needs physical access to power-cycle
+            it.
+
 endmenu

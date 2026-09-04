@@ -39,8 +39,8 @@ no certificate warnings, nothing to configure.
 | Project skeleton, partition layout | ✅ builds for `esp32` and `esp32s3` |
 | Web partition, static file serving, `/api/bridge` | ✅ |
 | WiFi | ⚠️ credentials compiled in via `menuconfig` - temporary |
+| Authentication, claim window | ✅ verified end to end on hardware |
 | BLE central and the byte relay | ⬜ |
-| Authentication, claim window | ⬜ |
 | Improv Serial provisioning, SoftAP fallback | ⬜ |
 | Web installer | ⬜ |
 
