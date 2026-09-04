@@ -1,0 +1,15 @@
+menu "Marstek BLE Bridge"
+
+    config BRIDGE_WIFI_SSID
+        string "WiFi SSID"
+        default ""
+        help
+            Temporary. Provisioning moves to Improv Serial (entered in the web flasher) with a
+            SoftAP fallback; until that exists, the credentials are compiled in so the firmware
+            can be brought up and tested at all.
+
+    config BRIDGE_WIFI_PASSWORD
+        string "WiFi password"
+        default ""
+
+endmenu

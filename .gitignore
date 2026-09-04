@@ -1,0 +1,10 @@
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+.DS_Store
+
+# The web partition is filled from the marstek-ble-control build, not kept here.
+web/*
+!web/.gitkeep

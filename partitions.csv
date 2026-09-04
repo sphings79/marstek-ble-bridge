@@ -1,0 +1,11 @@
+# ESP32/ESP32-S3 with 4 MB flash.
+#
+# One app partition, no OTA slots: two app copies plus the web partition do not fit in 4 MB, and
+# the bridge is updated through the web flasher anyway. If self-update is ever wanted, it needs an
+# 8 MB module rather than a rearrangement of this table.
+#
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+phy_init,   data, phy,     0xf000,   0x1000,
+factory,    app,  factory, 0x10000,  0x200000,
+web,        data, spiffs,  0x210000, 0x1E0000,
