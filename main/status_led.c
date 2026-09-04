@@ -2,6 +2,8 @@
 
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_timer.h"
 #include "sdkconfig.h"
 
@@ -69,6 +71,16 @@ esp_err_t status_led_init(void)
     }
 
     ESP_LOGI(TAG, "Status LED on GPIO %d", CONFIG_BRIDGE_STATUS_LED_GPIO);
+
+    // A short symmetric flicker before the real patterns start. Symmetric on purpose: with equal
+    // on and off times it looks the same whichever way round the LED is wired, so seeing it at all
+    // proves the pin is right, separately from whether the polarity is. It doubles as proof that
+    // the firmware started, which is the question a dark board never answers.
+    for (int i = 0; i < 6; i++) {
+        write_led(i % 2 == 0);
+        vTaskDelay(pdMS_TO_TICKS(150));
+    }
+
     advance(NULL);
 
     return ESP_OK;
