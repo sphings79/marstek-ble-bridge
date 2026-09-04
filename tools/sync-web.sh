@@ -23,4 +23,7 @@ rm -rf "$APP_DIR/dist-bridge"
 touch "$BRIDGE_DIR/web/.gitkeep"
 
 echo "web/ now holds:"
-find "$BRIDGE_DIR/web" -type f -not -name .gitkeep -exec ls -lh {} \; | awk '{print "  " $9 " (" $5 ")"}'
+find "$BRIDGE_DIR/web" -type f -not -name .gitkeep -print0 |
+    while IFS= read -r -d "" f; do
+        printf '  %s (%s)\n' "${f#"$BRIDGE_DIR/web/"}" "$(du -h "$f" | cut -f1)"
+    done

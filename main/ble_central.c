@@ -21,6 +21,11 @@ static const char *TAG = "ble";
 // Only Marstek devices are of interest, and the advertised name is what identifies them.
 #define NAME_PREFIX "MST_"
 
+// Standard GAP characteristic carrying the device name. Read after connecting so the bridge does
+// not depend on having scanned first - after a reboot it connects straight to the bound address,
+// and the name is what selects the dashboard and guards firmware updates against the wrong model.
+#define GAP_DEVICE_NAME_UUID 0x2A00
+
 #define MAX_SCAN_RESULTS 16
 
 static ble_notify_cb_t s_on_notify;
@@ -76,6 +81,40 @@ static bool str_to_addr(const char *str, ble_addr_t *out)
 
 /* ------------------------------------------------------------------ notifications & discovery */
 
+static void announce_connected(void)
+{
+    ESP_LOGI(TAG, "Connected to %s (%s)", s_device_name, s_device_address);
+    set_state(BLE_STATE_CONNECTED, NULL);
+}
+
+static int on_name_read(uint16_t conn_handle, const struct ble_gatt_error *error,
+                        struct ble_gatt_attr *attr, void *arg)
+{
+    (void) conn_handle;
+    (void) arg;
+
+    if (error->status == 0 && attr && attr->om) {
+        const uint16_t len = OS_MBUF_PKTLEN(attr->om);
+        const uint16_t copy = len < BLE_NAME_MAX - 1 ? len : BLE_NAME_MAX - 1;
+        if (ble_hs_mbuf_to_flat(attr->om, s_device_name, copy, NULL) == 0) {
+            s_device_name[copy] = '\0';
+            ESP_LOGI(TAG, "Device reports its name as \"%s\"", s_device_name);
+        }
+        return 0;
+    }
+
+    // Nothing read, or the read finished: report the link either way. A device that will not tell
+    // us its name still works; the name kept from the scan or the binding stands in.
+    if (error->status == BLE_HS_EDONE || error->status != 0) {
+        if (s_device_name[0] == '\0') {
+            ESP_LOGW(TAG, "Device did not report a name");
+        }
+        announce_connected();
+    }
+
+    return 0;
+}
+
 static int on_subscribe_done(uint16_t conn_handle, const struct ble_gatt_error *error,
                              struct ble_gatt_attr *attr, void *arg)
 {
@@ -89,8 +128,10 @@ static int on_subscribe_done(uint16_t conn_handle, const struct ble_gatt_error *
         return 0;
     }
 
-    ESP_LOGI(TAG, "Connected to %s (%s)", s_device_name, s_device_address);
-    set_state(BLE_STATE_CONNECTED, NULL);
+    const ble_uuid16_t name_uuid = BLE_UUID16_INIT(GAP_DEVICE_NAME_UUID);
+    if (ble_gattc_read_by_uuid(conn_handle, 1, 0xffff, &name_uuid.u, on_name_read, NULL) != 0) {
+        announce_connected();
+    }
 
     return 0;
 }
