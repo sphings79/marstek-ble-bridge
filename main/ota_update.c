@@ -8,6 +8,7 @@
 #include "esp_spiffs.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "ws_bridge.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -205,6 +206,20 @@ static esp_err_t version_get(httpd_req_t *req)
     return httpd_resp_sendstr(req, body);
 }
 
+static esp_err_t diag_get(httpd_req_t *req)
+{
+    if (!auth_guard(req)) {
+        return ESP_OK;
+    }
+
+    char body[512];
+    ws_bridge_stats_json(body, sizeof(body));
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_sendstr(req, body);
+}
+
 esp_err_t ota_update_register_handlers(httpd_handle_t server)
 {
     const httpd_uri_t update = {
@@ -223,6 +238,16 @@ esp_err_t ota_update_register_handlers(httpd_handle_t server)
         .handler = update_web_post,
     };
     err = httpd_register_uri_handler(server, &update_web);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    const httpd_uri_t diag = {
+        .uri = "/api/diag",
+        .method = HTTP_GET,
+        .handler = diag_get,
+    };
+    err = httpd_register_uri_handler(server, &diag);
     if (err != ESP_OK) {
         return err;
     }

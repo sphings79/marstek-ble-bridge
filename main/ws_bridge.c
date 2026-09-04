@@ -30,6 +30,10 @@ static httpd_handle_t s_server = NULL;
 static int s_client_fd = -1;
 static SemaphoreHandle_t s_send_lock;
 
+static uint32_t s_sends_ok = 0;
+static uint32_t s_sends_failed = 0;
+static uint32_t s_frames_in = 0;
+
 static char s_bound_addr[BLE_ADDR_STR_LEN];
 static char s_bound_name[BLE_NAME_MAX];
 static uint8_t s_bound_type = BLE_ADDR_TYPE_UNKNOWN;
@@ -103,8 +107,11 @@ static esp_err_t send_frame(httpd_ws_type_t type, const uint8_t *payload, size_t
     xSemaphoreGive(s_send_lock);
 
     if (err != ESP_OK) {
+        s_sends_failed++;
         ESP_LOGW(TAG, "Send failed (%s), dropping the client", esp_err_to_name(err));
         s_client_fd = -1;
+    } else {
+        s_sends_ok++;
     }
 
     return err;
@@ -153,6 +160,10 @@ static void send_status(ble_state_t state, const char *msg)
 
     if (state == BLE_STATE_CONNECTED) {
         cJSON_AddNumberToObject(json, "rssi", ble_central_rssi());
+        // Visible in the browser on purpose: 23 means the exchange did not happen, which caps
+        // every notification at 20 bytes and is the first thing to suspect when a storage that
+        // answers over Web Bluetooth stays silent here.
+        cJSON_AddNumberToObject(json, "mtu", ble_central_mtu());
     }
 
     // The bridge's own link matters as much as the Bluetooth one: a relayed frame crosses both,
@@ -338,6 +349,7 @@ static esp_err_t ws_handler(httpd_req_t *req)
             break;
 
         case HTTPD_WS_TYPE_BINARY:
+            s_frames_in++;
             if (frame.len < 2) {
                 break;
             }
@@ -368,6 +380,54 @@ static esp_err_t ws_handler(httpd_req_t *req)
     }
 
     return ESP_OK;
+}
+
+/**
+ * Every counter that matters, in one place.
+ *
+ * Debugging this from a browser two floors away meant one guess per firmware upload. Numbers that
+ * can simply be read - notifications in, sends out, writes, handles, MTU - turn that into looking.
+ */
+void ws_bridge_stats_json(char *out, size_t len)
+{
+    ble_stats_t b;
+    ble_central_stats(&b);
+
+    snprintf(out, len,
+             "{\"ble\":{"
+             "\"connected\":%s,\"encrypted\":%s,\"encStatus\":%u,"
+             "\"subscribed\":%s,\"subscribedTx\":%s,\"cccdWritten\":%u,"
+             "\"mtu\":%u,\"txHandle\":%u,\"rxHandle\":%u,\"cccdHandle\":%u,"
+             "\"txProps\":%u,\"rxProps\":%u,"
+             "\"notifications\":%u,\"notifyBytes\":%u,"
+             "\"writesOk\":%u,\"writesFailed\":%u,"
+             "\"writeAcks\":%u,\"writeRejects\":%u,\"lastWriteError\":%u"
+             "},\"ws\":{"
+             "\"clientFd\":%d,\"framesIn\":%u,\"sendsOk\":%u,\"sendsFailed\":%u"
+             "}}",
+             b.connected ? "true" : "false",
+             b.encrypted ? "true" : "false",
+             (unsigned) b.last_enc_status,
+             b.subscribed ? "true" : "false",
+             b.subscribed_tx ? "true" : "false",
+             (unsigned) b.cccd_written,
+             (unsigned) b.mtu,
+             (unsigned) b.tx_handle,
+             (unsigned) b.rx_handle,
+             (unsigned) b.cccd_handle,
+             (unsigned) b.tx_props,
+             (unsigned) b.rx_props,
+             (unsigned) b.notifications,
+             (unsigned) b.notify_bytes,
+             (unsigned) b.writes_ok,
+             (unsigned) b.writes_failed,
+             (unsigned) b.write_acks,
+             (unsigned) b.write_rejects,
+             (unsigned) b.last_write_error,
+             s_client_fd,
+             (unsigned) s_frames_in,
+             (unsigned) s_sends_ok,
+             (unsigned) s_sends_failed);
 }
 
 esp_err_t ws_bridge_start(httpd_handle_t server)

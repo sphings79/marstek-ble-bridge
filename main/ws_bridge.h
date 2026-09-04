@@ -14,3 +14,6 @@
  * Brings up the BLE central as well, since the two are only useful together.
  */
 esp_err_t ws_bridge_start(httpd_handle_t server);
+
+/** Fill `out` with a JSON snapshot of the relay and BLE counters. */
+void ws_bridge_stats_json(char *out, size_t len);

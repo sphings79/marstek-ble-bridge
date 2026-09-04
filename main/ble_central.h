@@ -62,6 +62,41 @@ const char *ble_central_device_name(void);
 const char *ble_central_device_address(void);
 int8_t ble_central_rssi(void);
 
+/** Negotiated ATT MTU. 23 means no exchange happened, which caps notifications at 20 bytes. */
+uint16_t ble_central_mtu(void);
+
+/** Counters for the diagnostics endpoint - the alternative is guessing from a distance. */
+typedef struct {
+    uint32_t notifications;
+    uint32_t notify_bytes;
+    /** Writes handed to the stack. Says nothing about whether the device accepted them. */
+    uint32_t writes_ok;
+    uint32_t writes_failed;
+    /** Write requests the device actually acknowledged, and the last ATT error it answered with. */
+    uint32_t write_acks;
+    uint32_t write_rejects;
+    uint16_t last_write_error;
+    uint16_t mtu;
+    uint16_t tx_handle;
+    uint16_t rx_handle;
+    uint16_t cccd_handle;
+    /** GATT properties of the write characteristic - which kinds of write it actually accepts. */
+    uint8_t tx_props;
+    /** GATT properties of the notify characteristic - which of notify/indicate it actually offers. */
+    uint8_t rx_props;
+    /** What we wrote to its configuration descriptor: 0x0001 notify, 0x0002 indicate. */
+    uint16_t cccd_written;
+    bool subscribed;
+    /** Second subscription, on the write characteristic - it advertises notify as well. */
+    bool subscribed_tx;
+    /** Whether the link is encrypted. Some devices stay silent until it is. */
+    bool encrypted;
+    uint16_t last_enc_status;
+    bool connected;
+} ble_stats_t;
+
+void ble_central_stats(ble_stats_t *out);
+
 /**
  * Write to the storage's TX characteristic. `with_response` picks between an acknowledged write
  * and a fire-and-forget one - regular commands use the former, OTA chunks the latter.

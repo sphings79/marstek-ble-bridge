@@ -42,6 +42,16 @@ static uint16_t s_rx_cccd_handle = 0;
 static char s_device_name[BLE_NAME_MAX];
 static char s_device_address[BLE_ADDR_STR_LEN];
 static int8_t s_rssi = 0;
+static uint16_t s_mtu = 23;
+static bool s_subscribed = false;
+static uint8_t s_tx_props = 0;
+static uint8_t s_rx_props = 0;
+static uint16_t s_cccd_written = 0;
+static uint16_t s_tx_cccd_handle = 0;
+static bool s_subscribed_tx = false;
+static bool s_encrypted = false;
+static uint16_t s_last_enc_status = 0;
+static ble_stats_t s_stats;
 
 static ble_addr_t s_target_addr;
 static bool s_have_target = false;
@@ -81,6 +91,30 @@ static bool str_to_addr(const char *str, uint8_t type, ble_addr_t *out)
 
 /* ------------------------------------------------------------------ notifications & discovery */
 
+/**
+ * Ask the storage for a bigger ATT MTU.
+ *
+ * NimBLE does not do this on its own, and the default of 23 leaves 20 usable bytes per
+ * notification. Browsers negotiate ~185 without being asked, which is why the same commands work
+ * over Web Bluetooth and produced silence here: a hundred-byte response has to survive the trip
+ * in one or two pieces rather than six.
+ */
+static int on_mtu_exchanged(uint16_t conn_handle, const struct ble_gatt_error *error,
+                            uint16_t mtu, void *arg)
+{
+    (void) conn_handle;
+    (void) arg;
+
+    if (error->status == 0) {
+        s_mtu = mtu;
+        ESP_LOGI(TAG, "MTU negotiated: %u bytes", (unsigned) mtu);
+    } else {
+        ESP_LOGW(TAG, "MTU exchange refused (%d), staying at %u", error->status, (unsigned) s_mtu);
+    }
+
+    return 0;
+}
+
 static void announce_connected(void)
 {
     ESP_LOGI(TAG, "Connected to %s (%s)", s_device_name, s_device_address);
@@ -115,6 +149,40 @@ static int on_name_read(uint16_t conn_handle, const struct ble_gatt_error *error
     return 0;
 }
 
+static int on_tx_subscribe_done(uint16_t conn_handle, const struct ble_gatt_error *error,
+                                struct ble_gatt_attr *attr, void *arg)
+{
+    (void) conn_handle;
+    (void) attr;
+    (void) arg;
+
+    s_subscribed_tx = (error->status == 0);
+    ESP_LOGI(TAG, "Second subscription on the write characteristic: %s",
+             s_subscribed_tx ? "accepted" : "refused");
+    return 0;
+}
+
+static int on_tx_descriptors(uint16_t conn_handle, const struct ble_gatt_error *error,
+                             uint16_t chr_val_handle, const struct ble_gatt_dsc *dsc, void *arg)
+{
+    (void) chr_val_handle;
+    (void) arg;
+
+    if (error->status == 0 && dsc && s_tx_cccd_handle == 0 &&
+        ble_uuid_u16(&dsc->uuid.u) == BLE_GATT_DSC_CLT_CFG_UUID16) {
+        s_tx_cccd_handle = dsc->handle;
+        return 0;
+    }
+
+    if (error->status == BLE_HS_EDONE && s_tx_cccd_handle != 0) {
+        static const uint8_t enable[2] = { 0x01, 0x00 };
+        ble_gattc_write_flat(conn_handle, s_tx_cccd_handle, enable, sizeof(enable),
+                             on_tx_subscribe_done, NULL);
+    }
+
+    return 0;
+}
+
 static int on_subscribe_done(uint16_t conn_handle, const struct ble_gatt_error *error,
                              struct ble_gatt_attr *attr, void *arg)
 {
@@ -127,6 +195,12 @@ static int on_subscribe_done(uint16_t conn_handle, const struct ble_gatt_error *
         set_state(BLE_STATE_ERROR, "Could not subscribe to notifications");
         return 0;
     }
+
+    s_subscribed = true;
+
+    // The write characteristic advertises notify as well. Subscribing to both costs one more
+    // descriptor write and removes the guess about which one the device actually uses.
+    ble_gattc_disc_all_dscs(conn_handle, s_tx_handle, s_rx_handle, on_tx_descriptors, NULL);
 
     const ble_uuid16_t name_uuid = BLE_UUID16_INIT(GAP_DEVICE_NAME_UUID);
     if (ble_gattc_read_by_uuid(conn_handle, 1, 0xffff, &name_uuid.u, on_name_read, NULL) != 0) {
@@ -163,8 +237,19 @@ static int on_descriptors(uint16_t conn_handle, const struct ble_gatt_error *err
         return 0;
     }
 
-    // Enabling notifications is a write of 0x0001 to the client configuration descriptor.
-    static const uint8_t enable[2] = { 0x01, 0x00 };
+    // Which bit to set depends on what the characteristic actually offers. Notify and indicate are
+    // different values in the same descriptor, and a device that only indicates will accept the
+    // notify bit without complaint and then never send anything - which looks exactly like a
+    // working subscription that produces no data.
+    const bool can_notify = (s_rx_props & BLE_GATT_CHR_PROP_NOTIFY) != 0;
+    const bool can_indicate = (s_rx_props & BLE_GATT_CHR_PROP_INDICATE) != 0;
+
+    s_cccd_written = can_notify ? 0x0001 : (can_indicate ? 0x0002 : 0x0001);
+
+    ESP_LOGI(TAG, "RX properties 0x%02x (notify=%d, indicate=%d), enabling 0x%04x",
+             s_rx_props, can_notify, can_indicate, s_cccd_written);
+
+    const uint8_t enable[2] = { (uint8_t) (s_cccd_written & 0xff), (uint8_t) (s_cccd_written >> 8) };
     ble_gattc_write_flat(conn_handle, s_rx_cccd_handle, enable, sizeof(enable),
                          on_subscribe_done, NULL);
     return 0;
@@ -179,8 +264,10 @@ static int on_characteristics(uint16_t conn_handle, const struct ble_gatt_error 
         const uint16_t uuid = ble_uuid_u16(&chr->uuid.u);
         if (uuid == TX_UUID) {
             s_tx_handle = chr->val_handle;
+            s_tx_props = chr->properties;
         } else if (uuid == RX_UUID) {
             s_rx_handle = chr->val_handle;
+            s_rx_props = chr->properties;
         }
         return 0;
     }
@@ -294,6 +381,19 @@ static int on_gap_event(struct ble_gap_event *event, void *arg)
 
             s_conn_handle = event->connect.conn_handle;
             s_tx_handle = s_rx_handle = s_rx_cccd_handle = 0;
+            s_mtu = 23;
+
+            ble_gattc_exchange_mtu(s_conn_handle, on_mtu_exchanged, NULL);
+
+            // Browsers and BlueZ negotiate this transparently when a device asks for it, so a
+            // storage that stays silent on an unencrypted link looks perfectly connected from
+            // here. Asking costs nothing if the device does not care.
+            {
+                const int sec = ble_gap_security_initiate(s_conn_handle);
+                if (sec != 0 && sec != BLE_HS_EALREADY) {
+                    ESP_LOGW(TAG, "Could not start pairing: %d", sec);
+                }
+            }
 
             ESP_LOGI(TAG, "Link up, discovering services");
             {
@@ -306,9 +406,28 @@ static int on_gap_event(struct ble_gap_event *event, void *arg)
             s_connect_pending = false;
             ESP_LOGI(TAG, "Disconnected, reason 0x%x", event->disconnect.reason);
             s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-            s_tx_handle = s_rx_handle = s_rx_cccd_handle = 0;
+            s_tx_handle = s_rx_handle = s_rx_cccd_handle = s_tx_cccd_handle = 0;
+            s_subscribed = s_subscribed_tx = false;
+            s_encrypted = false;
             s_device_name[0] = '\0';
             set_state(BLE_STATE_DISCONNECTED, NULL);
+            break;
+
+        case BLE_GAP_EVENT_ENC_CHANGE:
+            s_last_enc_status = event->enc_change.status;
+            {
+                struct ble_gap_conn_desc desc;
+                if (ble_gap_conn_find(s_conn_handle, &desc) == 0) {
+                    s_encrypted = desc.sec_state.encrypted;
+                }
+            }
+            ESP_LOGI(TAG, "Encryption change: status %d, encrypted=%d",
+                     event->enc_change.status, s_encrypted);
+            break;
+
+        case BLE_GAP_EVENT_MTU:
+            s_mtu = event->mtu.value;
+            ESP_LOGI(TAG, "MTU is now %u bytes", (unsigned) s_mtu);
             break;
 
         case BLE_GAP_EVENT_NOTIFY_RX: {
@@ -319,6 +438,8 @@ static int on_gap_event(struct ble_gap_event *event, void *arg)
             if (len <= sizeof(buf) &&
                 ble_hs_mbuf_to_flat(event->notify_rx.om, buf, sizeof(buf), NULL) == 0 &&
                 s_on_notify) {
+                s_stats.notifications++;
+                s_stats.notify_bytes += len;
                 ESP_LOGD(TAG, "Notification, %u bytes", (unsigned) len);
                 s_on_notify(buf, len);
             } else {
@@ -510,6 +631,28 @@ const char *ble_central_device_address(void)
     return s_have_target ? s_device_address : "";
 }
 
+uint16_t ble_central_mtu(void)
+{
+    return s_mtu;
+}
+
+void ble_central_stats(ble_stats_t *out)
+{
+    *out = s_stats;
+    out->mtu = s_mtu;
+    out->tx_handle = s_tx_handle;
+    out->rx_handle = s_rx_handle;
+    out->cccd_handle = s_rx_cccd_handle;
+    out->tx_props = s_tx_props;
+    out->rx_props = s_rx_props;
+    out->cccd_written = s_cccd_written;
+    out->subscribed = s_subscribed;
+    out->subscribed_tx = s_subscribed_tx;
+    out->encrypted = s_encrypted;
+    out->last_enc_status = s_last_enc_status;
+    out->connected = ble_central_is_connected();
+}
+
 int8_t ble_central_rssi(void)
 {
     if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
@@ -521,21 +664,51 @@ int8_t ble_central_rssi(void)
     return s_rssi;
 }
 
+/** Tells us what the device did with a write, which the queueing return value does not. */
+static int on_write_done(uint16_t conn_handle, const struct ble_gatt_error *error,
+                         struct ble_gatt_attr *attr, void *arg)
+{
+    (void) conn_handle;
+    (void) attr;
+    (void) arg;
+
+    if (error->status == 0) {
+        s_stats.write_acks++;
+    } else {
+        s_stats.write_rejects++;
+        s_stats.last_write_error = error->status;
+        ESP_LOGW(TAG, "Device rejected a write: status %d", error->status);
+    }
+
+    return 0;
+}
+
 esp_err_t ble_central_write(const uint8_t *data, size_t len, bool with_response)
 {
     if (!ble_central_is_connected()) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    int rc = with_response
-        ? ble_gattc_write_flat(s_conn_handle, s_tx_handle, data, len, NULL, NULL)
+    // Ask for an acknowledged write only if the characteristic actually offers one. Browsers pick
+    // this way too - Chrome's writeValue() looks at the properties and silently uses the
+    // unacknowledged form when that is all there is. Sending a write request to a characteristic
+    // that only accepts write-without-response gets it refused, and without a callback that
+    // refusal is invisible: the queueing call still returns success.
+    const bool supports_ack = (s_tx_props & BLE_GATT_CHR_PROP_WRITE) != 0;
+    const bool supports_no_ack = (s_tx_props & BLE_GATT_CHR_PROP_WRITE_NO_RSP) != 0;
+    const bool acknowledged = with_response ? supports_ack : (supports_no_ack ? false : supports_ack);
+
+    int rc = acknowledged
+        ? ble_gattc_write_flat(s_conn_handle, s_tx_handle, data, len, on_write_done, NULL)
         : ble_gattc_write_no_rsp_flat(s_conn_handle, s_tx_handle, data, len);
 
     if (rc != 0) {
+        s_stats.writes_failed++;
         ESP_LOGW(TAG, "Write of %u bytes failed: %d", (unsigned) len, rc);
         return ESP_FAIL;
     }
 
+    s_stats.writes_ok++;
     return ESP_OK;
 }
 

@@ -16,6 +16,7 @@ static const char *TAG = "auth";
 #define NVS_NAMESPACE "bridge"
 #define NVS_KEY_SALT  "pw_salt"
 #define NVS_KEY_KEY   "pw_key"
+#define NVS_KEY_SESSION "session"
 
 #define SALT_LEN 16
 #define KEY_LEN 32
@@ -44,6 +45,34 @@ static int64_t s_session_issued_us = 0;
 
 static int s_failed = 0;
 static int64_t s_lockout_until_us = 0;
+
+/**
+ * Keep the session across a restart.
+ *
+ * Every firmware or interface update reboots the bridge, and a session held only in RAM dies with
+ * it - so the browser still holds a cookie the bridge no longer recognises, and the next request
+ * is refused with no obvious reason. Updating firmware then means logging in between every step,
+ * which is exactly the friction the remote update was meant to remove.
+ *
+ * The token is no more sensitive than the password hash already stored beside it, and it is what
+ * the browser is holding anyway.
+ */
+static void persist_session(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs) != ESP_OK) {
+        return;
+    }
+
+    if (s_session_valid) {
+        nvs_set_str(nvs, NVS_KEY_SESSION, s_session);
+    } else {
+        nvs_erase_key(nvs, NVS_KEY_SESSION);
+    }
+
+    nvs_commit(nvs);
+    nvs_close(nvs);
+}
 
 static void to_hex(const uint8_t *bytes, size_t len, char *out)
 {
@@ -110,6 +139,16 @@ esp_err_t auth_init(void)
         ESP_LOGI(TAG, "Password is set");
     } else {
         ESP_LOGI(TAG, "No credentials stored - bridge is unclaimed");
+    }
+
+    size_t session_len = sizeof(s_session);
+    if (nvs_get_str(nvs, NVS_KEY_SESSION, s_session, &session_len) == ESP_OK &&
+        session_len == sizeof(s_session)) {
+        s_session_valid = true;
+        // Uptime is all we have to measure age by, and it starts again at zero, so a restored
+        // session gets a fresh window rather than an unknowable one.
+        s_session_issued_us = esp_timer_get_time();
+        ESP_LOGI(TAG, "Session restored from before the restart");
     }
 
     nvs_close(nvs);
@@ -329,6 +368,7 @@ static esp_err_t login_post(httpd_req_t *req)
     to_hex(session, sizeof(session), s_session);
     s_session_valid = true;
     s_session_issued_us = now;
+    persist_session();
 
     char cookie[160];
     snprintf(cookie, sizeof(cookie),
@@ -344,6 +384,7 @@ static esp_err_t login_post(httpd_req_t *req)
 static esp_err_t logout_post(httpd_req_t *req)
 {
     s_session_valid = false;
+    persist_session();
 
     httpd_resp_set_hdr(req, "Set-Cookie", "bridge_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
     send_status(req, "204 No Content");
