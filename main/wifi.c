@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "mdns.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -21,6 +22,8 @@ static const char *TAG = "wifi";
 #define NVS_NAMESPACE "bridge"
 #define NVS_KEY_SSID "wifi_ssid"
 #define NVS_KEY_PASSWORD "wifi_pass"
+
+#define MDNS_HOSTNAME "marstek-bridge"
 
 // Back off after a burst of quick retries. A bridge sits next to a battery in a cupboard with
 // nobody watching, so it must keep trying indefinitely rather than give up - but hammering the
@@ -55,6 +58,27 @@ static volatile bool s_trying = false;
 static EventGroupHandle_t s_events;
 static esp_timer_handle_t s_retry_timer;
 static esp_timer_handle_t s_fallback_timer;
+
+/**
+ * Answer to marstek-bridge.local, so the bridge can be found without hunting through a router.
+ *
+ * Worth more here than on most devices: the address is what someone types after an update, and
+ * what a browser is left holding when DHCP hands out a different one. Failing is not fatal - the
+ * IP still works - so nothing here stops the boot.
+ */
+static void announce_ourselves(void)
+{
+    if (mdns_init() != ESP_OK) {
+        ESP_LOGW(TAG, "No mDNS - reachable by address only");
+        return;
+    }
+
+    mdns_hostname_set(MDNS_HOSTNAME);
+    mdns_instance_name_set("Marstek BLE Bridge");
+    mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
+
+    ESP_LOGI(TAG, "Also reachable as %s.local", MDNS_HOSTNAME);
+}
 
 static void credentials_load(void)
 {
@@ -149,6 +173,10 @@ static void start_fallback_ap(void *arg)
     s_ap_active = true;
     status_led_set(STATUS_LED_AP);
 
+    // The setup page is reached over this access point, and a name is easier to pass on than the
+    // gateway address someone would otherwise have to guess.
+    announce_ourselves();
+
     if (s_ssid[0]) {
         ESP_LOGW(TAG, "No WiFi - serving \"%s\" instead, still retrying \"%s\" in the background",
                  (char *) ap.ap.ssid, s_ssid);
@@ -225,6 +253,8 @@ static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
     esp_timer_stop(s_fallback_timer);
     status_led_set(STATUS_LED_ONLINE);
     xEventGroupSetBits(s_events, BIT_CONNECTED);
+
+    announce_ourselves();
 
     if (!s_from_nvs && s_ssid[0]) {
         // Credentials that only exist in the build would be lost the moment a published firmware
@@ -432,8 +462,12 @@ esp_err_t wifi_start(void)
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
+    esp_netif_t *station = esp_netif_create_default_wifi_sta();
     esp_netif_create_default_wifi_ap();
+
+    // What the router shows in its client list. Separate from mDNS, and set before the interface
+    // comes up because the name goes out with the DHCP request.
+    esp_netif_set_hostname(station, MDNS_HOSTNAME);
 
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&init));

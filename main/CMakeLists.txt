@@ -26,6 +26,7 @@ idf_component_register(
         json
         esp_driver_gpio
         esp_driver_uart
+        espressif__mdns
         app_update
         esp_https_ota
         esp_http_client
