@@ -50,6 +50,24 @@ Netzwerk weiter und liefert [Marstek BLE Control](https://github.com/sphings79/m
 
 `http://marstek-bridge.local/` von überall im Haus öffnen. Das ist alles.
 
+<div align="center">
+
+<img alt="Das Bedienfeld über die Bridge auf einem Smartphone: Ladezustand, Batterie- und Netzleistung, und das WLAN-Signal der Bridge neben dem Bluetooth-Signal" src="https://raw.githubusercontent.com/sphings79/marstek-ble-bridge/master/docs/img/dashboard-mobile.png" height="620">
+
+</div>
+
+<details>
+<summary>Das vollständige Bedienfeld am Rechner, samt der Karten der Bridge</summary>
+
+<div align="center">
+
+<img alt="Das vollständige von der Bridge ausgelieferte Bedienfeld, am Ende die Karten Bridge Firmware und Bridge Password" src="https://raw.githubusercontent.com/sphings79/marstek-ble-bridge/master/docs/img/dashboard-desktop.png" width="100%">
+
+</div>
+
+</details>
+
+
 ## Warum er die Oberfläche selbst ausliefert
 
 Ein Browser auf einer `https://`-Seite darf keine `ws://`-Verbindung zu einem Gerät im LAN

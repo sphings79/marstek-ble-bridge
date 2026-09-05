@@ -50,6 +50,24 @@ the entire web interface — out of its own flash.
 
 Open `http://marstek-bridge.local/` from anywhere in the house. That is the whole thing.
 
+<div align="center">
+
+<img alt="The control panel reached through the bridge, on a phone: state of charge, battery and grid power, and the bridge's own WiFi signal beside the Bluetooth one" src="https://raw.githubusercontent.com/sphings79/marstek-ble-bridge/master/docs/img/dashboard-mobile.png" height="620">
+
+</div>
+
+<details>
+<summary>The whole panel on a desktop, including the bridge's own cards</summary>
+
+<div align="center">
+
+<img alt="The full control panel served by the bridge, ending in the Bridge Firmware and Bridge Password cards" src="https://raw.githubusercontent.com/sphings79/marstek-ble-bridge/master/docs/img/dashboard-desktop.png" width="100%">
+
+</div>
+
+</details>
+
+
 ## Why it serves the interface itself
 
 A browser on an `https://` page is not allowed to open a `ws://` connection to a device on your
