@@ -102,6 +102,17 @@ static void store_binding(const char *address, const char *name)
 static esp_timer_handle_t s_linger_timer;
 static esp_timer_handle_t s_refresh_timer;
 
+/**
+ * How many times a refreshed link is retried before giving up and leaving it to the browser.
+ *
+ * The storage regularly accepts the reconnect and drops it again straight away; the attempt after
+ * that works. Retrying here is the difference between a reload that just works and one that ends
+ * on an error the reader has to act on.
+ */
+#define REFRESH_RETRIES 3
+
+static int s_refresh_left;
+
 // Set while no browser is watching. A storage link that was left running with nobody on it stops
 // answering - the writes still go out and are still accepted, and nothing comes back - so it is
 // refreshed rather than handed over as it is.
@@ -169,6 +180,7 @@ static void refresh_abandoned_link(void)
         }
     }
 
+    s_refresh_left = REFRESH_RETRIES;
     ble_central_disconnect();
     esp_timer_stop(s_refresh_timer);
     esp_timer_start_once(s_refresh_timer, 1200 * 1000);
@@ -370,6 +382,18 @@ static void on_ble_notify(const uint8_t *data, size_t len)
 static void on_ble_state(ble_state_t state, const char *msg)
 {
     send_status(state, msg);
+
+    // A refresh that the storage refused. It usually takes the next one.
+    if (state == BLE_STATE_ERROR && s_refresh_left > 0 && client_count() > 0) {
+        s_refresh_left--;
+        ESP_LOGI(TAG, "Refresh refused, %d attempt(s) left", s_refresh_left);
+        if (s_refresh_timer) {
+            esp_timer_stop(s_refresh_timer);
+            esp_timer_start_once(s_refresh_timer, 2500 * 1000);
+        }
+    } else if (state == BLE_STATE_CONNECTED) {
+        s_refresh_left = 0;
+    }
 }
 
 static void on_scan_finished(const ble_device_t *devices, size_t count)

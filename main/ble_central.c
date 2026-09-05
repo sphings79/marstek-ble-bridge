@@ -421,8 +421,8 @@ static int on_gap_event(struct ble_gap_event *event, void *arg)
                 set_state(BLE_STATE_DISCONNECTED, NULL);
             } else {
                 set_state(BLE_STATE_ERROR,
-                          "The storage dropped the connection before it was usable. "
-                          "It usually accepts the next attempt.");
+                          "dropped_early|The storage dropped the connection before it was "
+                          "usable. It usually accepts the next attempt.");
             }
             break;
         }
