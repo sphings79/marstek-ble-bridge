@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 220" width="880" height="220" role="img" aria-label="Marstek BLE Bridge - your Venus storage on the network, without the cloud.">
+  <rect width="880" height="220" rx="16" fill="#14161a"/>
+
+  <g opacity="0.5">
+    <circle cx="762" cy="58" r="3" fill="#2c3038"/>
+    <circle cx="800" cy="58" r="3" fill="#2c3038"/>
+    <circle cx="838" cy="58" r="3" fill="#2c3038"/>
+    <circle cx="762" cy="96" r="3" fill="#2c3038"/>
+    <circle cx="800" cy="96" r="3" fill="#2c3038"/>
+    <circle cx="838" cy="96" r="3" fill="#2c3038"/>
+    <circle cx="762" cy="134" r="3" fill="#2c3038"/>
+    <circle cx="800" cy="134" r="3" fill="#2c3038"/>
+    <circle cx="838" cy="134" r="3" fill="#2c3038"/>
+    <circle cx="762" cy="172" r="3" fill="#2c3038"/>
+    <circle cx="800" cy="172" r="3" fill="#2c3038"/>
+    <circle cx="838" cy="172" r="3" fill="#2c3038"/>
+  </g>
+
+  <rect x="48" y="46" width="4" height="44" rx="2" fill="#4f9df5"/>
+  <text x="68" y="72" font-family="system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="30" font-weight="700" fill="#e6edf3">Marstek BLE Bridge</text>
+  <text x="68" y="96" font-family="system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="15" fill="#8b949e">Your Venus storage on the network. No cloud, no app, no standing next to the battery.</text>
+
+  <rect x="48" y="126" width="152" height="30" rx="15" fill="#1d2733"/>
+  <text x="124" y="146" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace" font-size="12" fill="#4f9df5">ESP32 · ESP-IDF</text>
+
+  <rect x="212" y="126" width="132" height="30" rx="15" fill="#1d2733"/>
+  <text x="278" y="146" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace" font-size="12" fill="#4f9df5">BLE ↔ WebSocket</text>
+
+  <rect x="356" y="126" width="176" height="30" rx="15" fill="#1d2733"/>
+  <text x="444" y="146" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace" font-size="12" fill="#4f9df5">flash in the browser</text>
+
+  <text x="48" y="188" font-family="system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12.5" fill="#8b949e">Unofficial project · not affiliated with Marstek</text>
+</svg>
