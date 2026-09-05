@@ -15,5 +15,13 @@
  */
 esp_err_t ws_bridge_start(httpd_handle_t server);
 
+/**
+ * A socket has gone. Called for every closed session, not only for a polite WebSocket close.
+ *
+ * A browser that navigates away usually just drops the TCP connection, so the close frame the
+ * handler waits for never arrives and the client would otherwise stay on the books forever.
+ */
+void ws_bridge_session_closed(int fd);
+
 /** Fill `out` with a JSON snapshot of the relay and BLE counters. */
 void ws_bridge_stats_json(char *out, size_t len);

@@ -402,7 +402,13 @@ static int on_gap_event(struct ble_gap_event *event, void *arg)
             }
             break;
 
-        case BLE_GAP_EVENT_DISCONNECT:
+        case BLE_GAP_EVENT_DISCONNECT: {
+            // A link that never became usable is not the same thing as one that ended. The
+            // storage regularly accepts a connection and drops it again within a second - the
+            // next attempt then works - and reporting that as a plain disconnect makes pressing
+            // connect look like it did nothing at all.
+            const bool was_usable = s_subscribed;
+
             s_connect_pending = false;
             ESP_LOGI(TAG, "Disconnected, reason 0x%x", event->disconnect.reason);
             s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
@@ -410,8 +416,16 @@ static int on_gap_event(struct ble_gap_event *event, void *arg)
             s_subscribed = s_subscribed_tx = false;
             s_encrypted = false;
             s_device_name[0] = '\0';
-            set_state(BLE_STATE_DISCONNECTED, NULL);
+
+            if (was_usable) {
+                set_state(BLE_STATE_DISCONNECTED, NULL);
+            } else {
+                set_state(BLE_STATE_ERROR,
+                          "The storage dropped the connection before it was usable. "
+                          "It usually accepts the next attempt.");
+            }
             break;
+        }
 
         case BLE_GAP_EVENT_ENC_CHANGE:
             s_last_enc_status = event->enc_change.status;
@@ -554,7 +568,11 @@ esp_err_t ble_central_connect(const char *address, uint8_t addr_type)
     // A second ble_gap_connect while one is outstanding just fails, so treat the repeat as a
     // no-op rather than turning it into an error the user has to interpret.
     if (s_connect_pending) {
-        ESP_LOGI(TAG, "Connection attempt already running, ignoring the repeat");
+        // Repeating the state rather than returning quietly. Pressing connect twice is the normal
+        // thing to do when the first press seems to do nothing, and answering with silence is
+        // exactly what makes it seem that way.
+        ESP_LOGI(TAG, "Connection attempt already running, repeating the state");
+        set_state(BLE_STATE_CONNECTING, NULL);
         return ESP_OK;
     }
 

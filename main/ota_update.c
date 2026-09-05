@@ -11,6 +11,7 @@
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_spiffs.h"
+#include "nvs.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "ws_bridge.h"
@@ -28,6 +29,70 @@ static void reboot_soon(void *arg)
     (void) arg;
     ESP_LOGI(TAG, "Restarting into the new firmware");
     esp_restart();
+}
+
+#define NVS_NAMESPACE "bridge"
+#define NVS_KEY_WEB_VERSION "web_ver"
+
+/**
+ * Remember which release the web partition came from.
+ *
+ * The interface carries no version of its own that anything here can read, so without this the
+ * only handle on it is the firmware's version - and the two are installed separately. Storing it
+ * is what lets the browser say "install" or "reinstall" and mean it.
+ */
+static void remember_web_version(const char *version)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs) != ESP_OK) {
+        return;
+    }
+
+    nvs_set_str(nvs, NVS_KEY_WEB_VERSION, version);
+    nvs_commit(nvs);
+    nvs_close(nvs);
+}
+
+static void web_version(char *out, size_t len)
+{
+    out[0] = '\0';
+
+    nvs_handle_t nvs;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) {
+        return;
+    }
+
+    size_t size = len;
+    if (nvs_get_str(nvs, NVS_KEY_WEB_VERSION, out, &size) != ESP_OK) {
+        out[0] = '\0';
+    }
+
+    nvs_close(nvs);
+}
+
+/**
+ * The release tag out of a download url, or "custom".
+ *
+ * GitHub puts it between /download/ and the file name. Anything else was not a release, and
+ * saying so is better than recording a tag that was never there.
+ */
+static void tag_from_url(const char *url, char *out, size_t len)
+{
+    const char *marker = strstr(url, "/download/");
+    if (!marker) {
+        strlcpy(out, "custom", len);
+        return;
+    }
+
+    marker += strlen("/download/");
+    const char *end = strchr(marker, '/');
+    if (!end || end == marker || (size_t) (end - marker) >= len) {
+        strlcpy(out, "custom", len);
+        return;
+    }
+
+    memcpy(out, marker, end - marker);
+    out[end - marker] = '\0';
 }
 
 /**
@@ -177,6 +242,10 @@ static esp_err_t update_web_post(httpd_req_t *req)
         remaining -= got;
     }
 
+    // Uploaded by hand, so it belongs to no release. Saying "custom" is what stops the interface
+    // from later claiming to be whichever release the firmware happens to be.
+    remember_web_version("custom");
+
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true,\"restarting\":true}");
 
@@ -200,11 +269,15 @@ static esp_err_t version_get(httpd_req_t *req)
     const esp_app_desc_t *app = esp_app_get_description();
     const esp_partition_t *running = esp_ota_get_running_partition();
 
-    char body[256];
+    char web[32];
+    web_version(web, sizeof(web));
+
+    char body[320];
     snprintf(body, sizeof(body),
-             "{\"version\":\"%s\",\"built\":\"%s %s\",\"idf\":\"%s\",\"slot\":\"%s\"}",
+             "{\"version\":\"%s\",\"built\":\"%s %s\",\"idf\":\"%s\",\"slot\":\"%s\","
+             "\"web\":\"%s\"}",
              app->version, app->date, app->time, app->idf_ver,
-             running ? running->label : "?");
+             running ? running->label : "?", web);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -385,6 +458,12 @@ static esp_err_t update_from_url_post(httpd_req_t *req)
         snprintf(response, sizeof(response), "{\"ok\":false,\"error\":\"%s\"}", err);
         httpd_resp_sendstr(req, response);
         return ESP_OK;
+    }
+
+    if (want_web) {
+        char tag[32];
+        tag_from_url(url_copy, tag, sizeof(tag));
+        remember_web_version(tag);
     }
 
     httpd_resp_set_type(req, "application/json");

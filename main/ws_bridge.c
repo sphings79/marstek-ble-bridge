@@ -6,12 +6,18 @@
 #include "ble_central.h"
 #include "cJSON.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "nvs.h"
 #include "wifi.h"
 
 static const char *TAG = "ws";
+
+// How long the storage link is kept after the last browser goes away. A page reload is a client
+// leaving and coming back within a second, and tearing the Bluetooth link down for that is what
+// made every reload land on a dashboard with no data behind it.
+#define LINGER_AFTER_LAST_CLIENT_MS 15000
 
 #define NVS_NAMESPACE "bridge"
 #define NVS_KEY_BOUND_ADDR "bound_addr"
@@ -93,6 +99,100 @@ static void store_binding(const char *address, const char *name)
 
 /* ------------------------------------------------------------------------------ sending out */
 
+static esp_timer_handle_t s_linger_timer;
+static esp_timer_handle_t s_refresh_timer;
+
+// Set while no browser is watching. A storage link that was left running with nobody on it stops
+// answering - the writes still go out and are still accepted, and nothing comes back - so it is
+// refreshed rather than handed over as it is.
+static bool s_link_abandoned = false;
+
+static int client_count(void);
+
+/** Nobody came back, so let the storage go. */
+static void linger_expired(void *arg)
+{
+    (void) arg;
+
+    if (client_count() > 0) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "Nobody came back - releasing the storage");
+    s_link_abandoned = false;
+    ble_central_disconnect();
+}
+
+static void cancel_linger(void)
+{
+    if (s_linger_timer) {
+        esp_timer_stop(s_linger_timer);
+    }
+}
+
+/** Reconnect once the old link has finished going away. */
+static void refresh_link(void *arg)
+{
+    (void) arg;
+
+    if (client_count() == 0 || !s_bound_addr[0]) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "Re-establishing the storage link for the browser that just arrived");
+    ble_central_connect(s_bound_addr, s_bound_type);
+}
+
+/**
+ * Hand a returning browser a link that actually talks.
+ *
+ * Keeping the link across a reload is what stops every refresh from dropping the battery, but a
+ * link nobody used in the meantime comes back mute: the storage accepts writes and answers none
+ * of them. Cycling it is the only thing found to bring it back.
+ */
+static void refresh_abandoned_link(void)
+{
+    if (!s_link_abandoned) {
+        return;
+    }
+
+    s_link_abandoned = false;
+
+    if (!ble_central_is_connected()) {
+        return;
+    }
+
+    if (!s_refresh_timer) {
+        const esp_timer_create_args_t args = { .callback = &refresh_link, .name = "ws_refresh" };
+        if (esp_timer_create(&args, &s_refresh_timer) != ESP_OK) {
+            return;
+        }
+    }
+
+    ble_central_disconnect();
+    esp_timer_stop(s_refresh_timer);
+    esp_timer_start_once(s_refresh_timer, 1200 * 1000);
+}
+
+static void start_linger(void)
+{
+    if (!s_linger_timer) {
+        const esp_timer_create_args_t args = { .callback = &linger_expired, .name = "ws_linger" };
+        if (esp_timer_create(&args, &s_linger_timer) != ESP_OK) {
+            // No timer, no grace period - fall back to the old behaviour rather than holding the
+            // battery's only connection forever.
+            ble_central_disconnect();
+            return;
+        }
+    }
+
+    s_link_abandoned = true;
+    esp_timer_stop(s_linger_timer);
+    esp_timer_start_once(s_linger_timer, (uint64_t) LINGER_AFTER_LAST_CLIENT_MS * 1000);
+    ESP_LOGI(TAG, "Last browser left - holding the storage for %d s in case it comes back",
+             LINGER_AFTER_LAST_CLIENT_MS / 1000);
+}
+
 static int client_count(void)
 {
     int n = 0;
@@ -113,11 +213,17 @@ static bool add_client(int fd)
     return false;
 }
 
-static void drop_client(int fd)
+/** Returns whether the socket was on the books. */
+static bool drop_client(int fd)
 {
+    bool found = false;
     for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (s_clients[i] == fd) s_clients[i] = -1;
+        if (s_clients[i] == fd) {
+            s_clients[i] = -1;
+            found = true;
+        }
     }
+    return found;
 }
 
 static esp_err_t send_to(int fd, httpd_ws_type_t type, const uint8_t *payload, size_t len)
@@ -301,6 +407,11 @@ static void handle_control(const char *text, size_t len)
     }
 
     if (strcmp(type->valuestring, "connect") == 0) {
+        // Answer even when there is nothing to do. A press of connect that produces no reply at
+        // all is indistinguishable from a broken bridge, and the browser has no way to tell which
+        // it got.
+        cancel_linger();
+
         if (!s_bound_addr[0]) {
             send_error("not_bound", "No storage selected yet");
         } else if (ble_central_connect(s_bound_addr, s_bound_type) != ESP_OK) {
@@ -369,6 +480,11 @@ static esp_err_t ws_post_handshake(httpd_req_t *req)
         return ESP_OK;
     }
 
+    // Somebody is watching again, so the storage is not going anywhere - but the link it was
+    // left on has to be refreshed before it is any use.
+    cancel_linger();
+    refresh_abandoned_link();
+
     ESP_LOGI(TAG, "Client connected (fd %d), %d now watching", fd, client_count());
 
     // Addressed to the newcomer rather than broadcast: the others already know.
@@ -424,11 +540,13 @@ static esp_err_t ws_handler(httpd_req_t *req)
             drop_client(fd);
             ESP_LOGI(TAG, "Client on fd %d left, %d still watching", fd, client_count());
 
-            // Only once nobody is left. A battery accepts one BLE connection at a time, so holding
-            // it after every browser has gone would lock out everything else, including the vendor
-            // app - but dropping it while another tab is still using it was the older mistake.
+            // Only once nobody is left, and not straight away. A battery accepts one BLE
+            // connection at a time, so holding it after every browser has gone would lock out
+            // everything else, including the vendor app - but dropping it while another tab is
+            // still using it was the older mistake, and dropping it for the second a reload takes
+            // was the one after that.
             if (client_count() == 0) {
-                ble_central_disconnect();
+                start_linger();
             }
             break;
         }
@@ -486,6 +604,19 @@ void ws_bridge_stats_json(char *out, size_t len)
              (unsigned) s_frames_in,
              (unsigned) s_sends_ok,
              (unsigned) s_sends_failed);
+}
+
+void ws_bridge_session_closed(int fd)
+{
+    if (!drop_client(fd)) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "Socket %d gone, %d still watching", fd, client_count());
+
+    if (client_count() == 0) {
+        start_linger();
+    }
 }
 
 esp_err_t ws_bridge_start(httpd_handle_t server)

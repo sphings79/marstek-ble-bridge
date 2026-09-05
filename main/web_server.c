@@ -12,6 +12,8 @@
 #include "storage.h"
 #include "wifi.h"
 #include "wifi_setup.h"
+#include <unistd.h>
+
 #include "ws_bridge.h"
 
 static const char *TAG = "web";
@@ -150,9 +152,22 @@ static esp_err_t static_file_get(httpd_req_t *req)
     return ESP_OK;
 }
 
+/** Taking this over means closing the socket ourselves; the server no longer does it. */
+static void on_session_close(httpd_handle_t handle, int fd)
+{
+    (void) handle;
+
+    ws_bridge_session_closed(fd);
+    close(fd);
+}
+
 esp_err_t web_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    // The only reliable notice that a browser has gone. A page reload or a closed tab drops the
+    // connection without sending a WebSocket close frame, so the frame handler never hears about
+    // it and the relay would keep counting a client that left minutes ago.
+    config.close_fn = on_session_close;
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.lru_purge_enable = true;
     config.stack_size = 8192;
