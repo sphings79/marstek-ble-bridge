@@ -1,5 +1,10 @@
 <div align="center">
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/sphings79/marstek-ble-bridge/master/docs/img/hero-dark.svg">
+  <img alt="Marstek BLE Bridge - your Venus storage on the network, without the cloud" src="https://raw.githubusercontent.com/sphings79/marstek-ble-bridge/master/docs/img/hero-light.svg" width="880">
+</picture>
+
 # Marstek BLE Bridge
 
 **Your Marstek Venus storage, on the network — without the cloud, without an app, without standing next to the battery.**
@@ -34,12 +39,14 @@ An ESP32 you leave near the storage. It holds the Bluetooth connection and relay
 network, and it serves [Marstek BLE Control](https://github.com/sphings79/marstek-ble-control) —
 the entire web interface — out of its own flash.
 
-```
-Browser  ──WiFi──►  ESP32  ──Bluetooth──►  Venus storage
-             │        │
-             │        └── serves the web interface itself
-             └── WebSocket carrying raw device bytes
-```
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/sphings79/marstek-ble-bridge/master/docs/img/architecture-dark.svg">
+  <img alt="A browser reaches the storage through an ESP32: WiFi and a WebSocket to the bridge, Bluetooth from the bridge to the battery" src="https://raw.githubusercontent.com/sphings79/marstek-ble-bridge/master/docs/img/architecture-light.svg" width="880">
+</picture>
+
+</div>
 
 Open `http://marstek-bridge.local/` from anywhere in the house. That is the whole thing.
 

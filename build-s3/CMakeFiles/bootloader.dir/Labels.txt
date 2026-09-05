@@ -1,0 +1,13 @@
+# Target labels
+ bootloader
+# Source files and their labels
+/Users/sphings/Claude/Projects/Marstek BLE Bridge/build-s3/CMakeFiles/bootloader
+/Users/sphings/Claude/Projects/Marstek BLE Bridge/build-s3/CMakeFiles/bootloader.rule
+/Users/sphings/Claude/Projects/Marstek BLE Bridge/build-s3/CMakeFiles/bootloader-complete.rule
+/Users/sphings/Claude/Projects/Marstek BLE Bridge/build-s3/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule
+/Users/sphings/Claude/Projects/Marstek BLE Bridge/build-s3/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule
+/Users/sphings/Claude/Projects/Marstek BLE Bridge/build-s3/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule
+/Users/sphings/Claude/Projects/Marstek BLE Bridge/build-s3/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule
+/Users/sphings/Claude/Projects/Marstek BLE Bridge/build-s3/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule
+/Users/sphings/Claude/Projects/Marstek BLE Bridge/build-s3/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule
+/Users/sphings/Claude/Projects/Marstek BLE Bridge/build-s3/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule

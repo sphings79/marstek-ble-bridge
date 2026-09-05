@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 268" width="880" height="268" role="img" aria-label="A browser reaches the Venus storage through an ESP32 bridge: WiFi and a WebSocket to the bridge, Bluetooth from the bridge to the storage.">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#1976d2"/>
+    </marker>
+  </defs>
+
+  <rect x="26" y="52" width="184" height="96" rx="12" fill="#ffffff" stroke="#d0d7de" stroke-width="1.5"/>
+  <text x="118" y="92" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="17" font-weight="600" fill="#1f2328">Browser</text>
+  <text x="118" y="116" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="13" fill="#656d76">anywhere in the house</text>
+
+  <rect x="348" y="52" width="184" height="96" rx="12" fill="#f3f8fd" stroke="#1976d2" stroke-width="2"/>
+  <text x="440" y="92" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="17" font-weight="600" fill="#1f2328">ESP32 bridge</text>
+  <text x="440" y="116" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="13" fill="#656d76">next to the battery</text>
+
+  <rect x="670" y="52" width="184" height="96" rx="12" fill="#ffffff" stroke="#d0d7de" stroke-width="1.5"/>
+  <text x="762" y="92" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="17" font-weight="600" fill="#1f2328">Venus storage</text>
+  <text x="762" y="116" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="13" fill="#656d76">in the cellar</text>
+
+  <line x1="212" y1="100" x2="344" y2="100" stroke="#1976d2" stroke-width="2" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text x="278" y="82" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="600" fill="#1976d2">WiFi</text>
+  <text x="278" y="124" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#656d76">WebSocket</text>
+
+  <line x1="534" y1="100" x2="666" y2="100" stroke="#1976d2" stroke-width="2" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text x="600" y="82" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="600" fill="#1976d2">Bluetooth LE</text>
+  <text x="600" y="124" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#656d76">a few metres</text>
+
+  <line x1="440" y1="148" x2="440" y2="182" stroke="#9ec5ee" stroke-width="1.5" stroke-dasharray="4 4"/>
+  <rect x="196" y="182" width="488" height="56" rx="10" fill="#f3f8fd" stroke="#9ec5ee" stroke-width="1.5"/>
+  <text x="440" y="206" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="13.5" font-weight="600" fill="#1f2328">It serves the web interface from its own flash</text>
+  <text x="440" y="226" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12.5" fill="#656d76">same origin, plain HTTP - no certificate warnings, nothing to configure</text>
+</svg>
