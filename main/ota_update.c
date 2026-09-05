@@ -229,6 +229,11 @@ static esp_err_t fetch_firmware(const char *url, char *err, size_t err_len)
         .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = 30000,
         .keep_alive_enable = true,
+        // A release download redirects to a signed storage url that runs to several hundred
+        // characters. The default half-kilobyte buffers cannot hold the request line that
+        // follows, and the connection fails before anything is sent.
+        .buffer_size = 2048,
+        .buffer_size_tx = 2048,
     };
 
     esp_https_ota_config_t cfg = { .http_config = &http };
@@ -254,6 +259,9 @@ static esp_err_t fetch_web(const char *url, char *err, size_t err_len)
         .url = url,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = 30000,
+        // As above: room for the redirected url a release download lands on.
+        .buffer_size = 2048,
+        .buffer_size_tx = 2048,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&http);
@@ -262,15 +270,32 @@ static esp_err_t fetch_web(const char *url, char *err, size_t err_len)
         return ESP_FAIL;
     }
 
-    esp_err_t result = esp_http_client_open(client, 0);
-    if (result != ESP_OK) {
-        snprintf(err, err_len, "connect: %s", esp_err_to_name(result));
-        esp_http_client_cleanup(client);
-        return result;
-    }
+    // Opening the connection by hand means redirects are ours to follow, and release downloads
+    // are nothing but redirects: GitHub answers every one of them with a 302 to a storage host.
+    // Five hops is far more than that needs and still terminates.
+    esp_err_t result = ESP_FAIL;
+    int total = 0;
+    int status = 0;
 
-    const int total = esp_http_client_fetch_headers(client);
-    const int status = esp_http_client_get_status_code(client);
+    for (int hop = 0; hop < 5; hop++) {
+        result = esp_http_client_open(client, 0);
+        if (result != ESP_OK) {
+            snprintf(err, err_len, "connect: %s", esp_err_to_name(result));
+            esp_http_client_cleanup(client);
+            return result;
+        }
+
+        total = esp_http_client_fetch_headers(client);
+        status = esp_http_client_get_status_code(client);
+
+        if (status != 301 && status != 302 && status != 303 && status != 307 && status != 308) {
+            break;
+        }
+
+        esp_http_client_set_redirection(client);
+        esp_http_client_close(client);
+        status = 0;
+    }
 
     if (status != 200 || total <= 0 || (size_t) total > web->size) {
         snprintf(err, err_len, "HTTP %d, %d bytes", status, total);
