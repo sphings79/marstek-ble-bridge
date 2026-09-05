@@ -1,6 +1,8 @@
 build/
+build-*/
 sdkconfig
 sdkconfig.old
+sdkconfig.s3
 managed_components/
 dependencies.lock
 .DS_Store
