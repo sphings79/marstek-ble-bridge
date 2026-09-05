@@ -381,6 +381,129 @@ static esp_err_t login_post(httpd_req_t *req)
     return ESP_OK;
 }
 
+/**
+ * Change the password.
+ *
+ * Wants three things: a valid session, a fresh nonce answered with the *old* key, and the salt and
+ * key derived from the new password. The middle one is the point. A session cookie is readable on
+ * the wire, and this is the one request where that would matter beyond eavesdropping - it would
+ * let whoever caught it lock the owner out of their own bridge. Proving the old password first
+ * makes a stolen cookie insufficient.
+ *
+ * The new key is derived in the browser, exactly as when claiming, so neither password ever
+ * crosses the network.
+ */
+static esp_err_t password_post(httpd_req_t *req)
+{
+    const int64_t now = esp_timer_get_time();
+
+    if (now < s_lockout_until_us) {
+        send_status(req, "429 Too Many Requests");
+        return ESP_OK;
+    }
+
+    if (!auth_guard(req)) {
+        return ESP_OK;
+    }
+
+    if (!s_nonce_valid || (now - s_nonce_issued_us) > (int64_t) NONCE_LIFETIME_US) {
+        send_status(req, "401 Unauthorized");
+        return ESP_OK;
+    }
+
+    char body[384];
+    if (read_body(req, body, sizeof(body)) != ESP_OK) {
+        send_status(req, "400 Bad Request");
+        return ESP_OK;
+    }
+
+    cJSON *json = cJSON_Parse(body);
+    if (!json) {
+        send_status(req, "400 Bad Request");
+        return ESP_OK;
+    }
+
+    const cJSON *nonce_item = cJSON_GetObjectItemCaseSensitive(json, "nonce");
+    const cJSON *response_item = cJSON_GetObjectItemCaseSensitive(json, "response");
+    const cJSON *salt_item = cJSON_GetObjectItemCaseSensitive(json, "salt");
+    const cJSON *key_item = cJSON_GetObjectItemCaseSensitive(json, "key");
+
+    uint8_t claimed_nonce[NONCE_LEN];
+    uint8_t offered[KEY_LEN];
+    uint8_t salt[SALT_LEN];
+    uint8_t key[KEY_LEN];
+
+    const bool parsed =
+        cJSON_IsString(nonce_item) && cJSON_IsString(response_item) &&
+        cJSON_IsString(salt_item) && cJSON_IsString(key_item) &&
+        from_hex(nonce_item->valuestring, claimed_nonce, sizeof(claimed_nonce)) &&
+        from_hex(response_item->valuestring, offered, sizeof(offered)) &&
+        from_hex(salt_item->valuestring, salt, sizeof(salt)) &&
+        from_hex(key_item->valuestring, key, sizeof(key));
+    cJSON_Delete(json);
+
+    if (!parsed) {
+        send_status(req, "400 Bad Request");
+        return ESP_OK;
+    }
+
+    // Spent either way, as in login: a captured response must not survive its own use.
+    s_nonce_valid = false;
+
+    uint8_t expected[KEY_LEN];
+    const mbedtls_md_info_t *md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+
+    if (!equal_ct(claimed_nonce, s_nonce, sizeof(s_nonce)) ||
+        mbedtls_md_hmac(md, s_key, sizeof(s_key), s_nonce, sizeof(s_nonce), expected) != 0 ||
+        !equal_ct(offered, expected, sizeof(expected))) {
+        if (++s_failed >= MAX_FAILED_ATTEMPTS) {
+            ESP_LOGW(TAG, "Too many failed password changes, locking out for a minute");
+            s_lockout_until_us = now + (int64_t) LOCKOUT_US;
+            s_failed = 0;
+        }
+        send_status(req, "401 Unauthorized");
+        return ESP_OK;
+    }
+
+    s_failed = 0;
+
+    nvs_handle_t nvs;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs) != ESP_OK) {
+        send_status(req, "500 Internal Server Error");
+        return ESP_OK;
+    }
+
+    esp_err_t err = nvs_set_blob(nvs, NVS_KEY_SALT, salt, sizeof(salt));
+    if (err == ESP_OK) {
+        err = nvs_set_blob(nvs, NVS_KEY_KEY, key, sizeof(key));
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Storing the new password failed: %s", esp_err_to_name(err));
+        send_status(req, "500 Internal Server Error");
+        return ESP_OK;
+    }
+
+    memcpy(s_salt, salt, sizeof(salt));
+    memcpy(s_key, key, sizeof(key));
+
+    // Every session dies with the old password, this one included. Someone changing their password
+    // because a session may have leaked would gain nothing if the leaked session outlived it.
+    s_session_valid = false;
+    persist_session();
+
+    httpd_resp_set_hdr(req, "Set-Cookie",
+                       "bridge_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
+
+    ESP_LOGI(TAG, "Password changed - all sessions ended");
+    send_status(req, "204 No Content");
+    return ESP_OK;
+}
+
 static esp_err_t logout_post(httpd_req_t *req)
 {
     s_session_valid = false;
@@ -444,6 +567,7 @@ esp_err_t auth_register_handlers(httpd_handle_t server)
         { .uri = "/api/auth/claim",     .method = HTTP_POST, .handler = claim_post },
         { .uri = "/api/auth/login",     .method = HTTP_POST, .handler = login_post },
         { .uri = "/api/auth/logout",    .method = HTTP_POST, .handler = logout_post },
+        { .uri = "/api/auth/password",  .method = HTTP_POST, .handler = password_post },
     };
 
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {

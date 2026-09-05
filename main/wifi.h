@@ -9,6 +9,9 @@
 #define WIFI_SSID_MAX 33
 #define WIFI_PASSWORD_MAX 65
 
+/** Hostnames are a DNS label: at most 63 characters, and we are stricter still. */
+#define WIFI_HOSTNAME_MAX 32
+
 typedef struct {
     char ssid[WIFI_SSID_MAX];
     int8_t rssi;
@@ -50,6 +53,18 @@ const char *wifi_ip(void);
  * someone holding an unreachable board. On failure the previous credentials are restored.
  */
 esp_err_t wifi_provision(const char *ssid, const char *password);
+
+/**
+ * The name the bridge answers to, without the .local suffix.
+ *
+ * Settable because one household can have more than one: a second bridge would otherwise be
+ * renamed to marstek-bridge-2 by mDNS collision handling, and which one that is depends on the
+ * order they happened to boot in.
+ */
+const char *wifi_hostname(void);
+
+/** Rename the bridge. Lower-case letters, digits and inner hyphens only. */
+esp_err_t wifi_set_hostname(const char *name);
 
 /** Forget the stored credentials. Takes effect on the next boot. */
 esp_err_t wifi_forget(void);

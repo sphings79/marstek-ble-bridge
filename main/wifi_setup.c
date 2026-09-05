@@ -32,12 +32,14 @@ static esp_err_t status_get(httpd_req_t *req)
 {
     char body[256];
     snprintf(body, sizeof(body),
-             "{\"connected\":%s,\"ssid\":\"%s\",\"ip\":\"%s\",\"ap\":%s,\"configured\":%s}",
+             "{\"connected\":%s,\"ssid\":\"%s\",\"ip\":\"%s\",\"ap\":%s,"
+             "\"configured\":%s,\"hostname\":\"%s\"}",
              wifi_is_connected() ? "true" : "false",
              wifi_ssid(),
              wifi_ip(),
              wifi_fallback_ap_active() ? "true" : "false",
-             wifi_has_credentials() ? "true" : "false");
+             wifi_has_credentials() ? "true" : "false",
+             wifi_hostname());
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -145,6 +147,64 @@ static esp_err_t credentials_post(httpd_req_t *req)
     return httpd_resp_sendstr(req, body);
 }
 
+/**
+ * Rename the bridge.
+ *
+ * Its own endpoint rather than a field on the credentials form: renaming is the thing you do when
+ * a second bridge arrives, long after the first was set up, and it must not require retyping a
+ * WiFi password to get there.
+ */
+static esp_err_t hostname_post(httpd_req_t *req)
+{
+    if (!setup_allowed(req)) {
+        return ESP_OK;
+    }
+
+    char raw[160];
+    if (req->content_len >= (int) sizeof(raw)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body too large");
+        return ESP_FAIL;
+    }
+
+    int received = 0;
+    while (received < req->content_len) {
+        const int got = httpd_req_recv(req, raw + received, req->content_len - received);
+        if (got <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Truncated body");
+            return ESP_FAIL;
+        }
+        received += got;
+    }
+    raw[received] = '\0';
+
+    cJSON *json = cJSON_Parse(raw);
+    const cJSON *name = json ? cJSON_GetObjectItemCaseSensitive(json, "hostname") : NULL;
+
+    if (!cJSON_IsString(name)) {
+        cJSON_Delete(json);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "A name is required");
+        return ESP_FAIL;
+    }
+
+    const esp_err_t err = wifi_set_hostname(name->valuestring);
+    cJSON_Delete(json);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    if (err == ESP_ERR_INVALID_ARG) {
+        return httpd_resp_sendstr(req,
+            "{\"ok\":false,\"error\":\"Lower-case letters, digits and inner hyphens only\"}");
+    }
+    if (err != ESP_OK) {
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"Could not store the name\"}");
+    }
+
+    char body[96];
+    snprintf(body, sizeof(body), "{\"ok\":true,\"hostname\":\"%s\"}", wifi_hostname());
+    return httpd_resp_sendstr(req, body);
+}
+
 static esp_err_t forget_post(httpd_req_t *req)
 {
     // Never unauthenticated: forgetting the network on a claimed bridge would strand it behind an
@@ -174,6 +234,7 @@ esp_err_t wifi_setup_register_handlers(httpd_handle_t server)
         { .uri = "/api/wifi",       .method = HTTP_POST, .handler = credentials_post },
         { .uri = "/api/wifi/scan",  .method = HTTP_GET,  .handler = scan_get },
         { .uri = "/api/wifi/forget",.method = HTTP_POST, .handler = forget_post },
+        { .uri = "/api/wifi/hostname", .method = HTTP_POST, .handler = hostname_post },
     };
 
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {

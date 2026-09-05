@@ -20,7 +20,8 @@ input,select,button{width:100%;box-sizing:border-box;padding:.6rem .7rem;font-si
  border:1px solid #d3d6db;border-radius:8px;background:#fff;color:#111}
 button{margin-top:1.5rem;background:#1976d2;color:#fff;border:0;font-weight:600;cursor:pointer}
 button:disabled{opacity:.6;cursor:default}
-#msg{margin-top:1rem;padding:.7rem;border-radius:8px;font-size:.875rem;display:none}
+#msg,#hostmsg{margin-top:1rem;padding:.7rem;border-radius:8px;font-size:.875rem;display:none}
+.hint{margin:.4rem 0 0;font-size:.8125rem;color:#6b7280}
 .ok{background:#e6f4ea;color:#1e6b34}
 .bad{background:#fde8e6;color:#a1271b}
 @media (prefers-color-scheme:dark){.ok{background:#12301d;color:#8fd6a6}.bad{background:#3a1512;color:#f0a49b}}
@@ -42,10 +43,55 @@ button:disabled{opacity:.6;cursor:default}
 
   <button id="go">Connect</button>
   <div id="msg"></div>
+
+  <hr style="margin:1.75rem 0;border:0;border-top:1px solid #e3e5e8">
+
+  <label for="host">Name on the network</label>
+  <input id="host" placeholder="marstek-bridge" autocomplete="off">
+  <p class="hint">Reached at <span id="hostpreview">marstek-bridge</span>.local — give a second
+    bridge its own name, or they end up telling each other apart by boot order.</p>
+  <button id="rename">Rename</button>
+  <div id="hostmsg"></div>
 </div>
 <script>
 const $ = (id) => document.getElementById(id);
-const say = (text, ok) => { const m = $('msg'); m.textContent = text; m.className = ok ? 'ok' : 'bad'; m.style.display = 'block'; };
+const tell = (id, text, ok) => {
+  const m = $(id);
+  m.textContent = text;
+  m.className = ok ? 'ok' : 'bad';
+  m.style.display = 'block';
+};
+const say = (text, ok) => tell('msg', text, ok);
+
+fetch('api/wifi').then(r => r.json()).then(s => {
+  $('host').value = s.hostname || '';
+  $('hostpreview').textContent = s.hostname || 'marstek-bridge';
+}).catch(() => { /* the form still works without it */ });
+
+$('host').oninput = () => {
+  $('hostpreview').textContent = $('host').value.trim() || 'marstek-bridge';
+};
+
+$('rename').onclick = async () => {
+  const hostname = $('host').value.trim();
+  if (!hostname) { tell('hostmsg', 'Pick a name first.', false); return; }
+
+  $('rename').disabled = true;
+  try {
+    const r = await fetch('api/wifi/hostname', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hostname }),
+    });
+    const body = await r.json();
+    tell('hostmsg', body.ok
+      ? 'Now at http://' + body.hostname + '.local/ — the router picks the new name up after a restart.'
+      : (body.error || 'Could not rename it.'), !!body.ok);
+  } catch (e) {
+    tell('hostmsg', 'The bridge did not answer.', false);
+  }
+  $('rename').disabled = false;
+};
 
 fetch('api/wifi/scan').then(r => r.json()).then(list => {
   const sel = $('ssid');

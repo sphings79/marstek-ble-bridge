@@ -23,7 +23,9 @@ static const char *TAG = "wifi";
 #define NVS_KEY_SSID "wifi_ssid"
 #define NVS_KEY_PASSWORD "wifi_pass"
 
-#define MDNS_HOSTNAME "marstek-bridge"
+#define NVS_KEY_HOSTNAME "hostname"
+
+#define DEFAULT_HOSTNAME "marstek-bridge"
 
 // Back off after a burst of quick retries. A bridge sits next to a battery in a cupboard with
 // nobody watching, so it must keep trying indefinitely rather than give up - but hammering the
@@ -45,6 +47,7 @@ static bool s_ap_active = false;
 static char s_ssid[WIFI_SSID_MAX];
 static char s_password[WIFI_PASSWORD_MAX];
 static char s_ip[16];
+static char s_hostname[WIFI_HOSTNAME_MAX];
 
 // Whether the credentials in use came from NVS rather than the build. Anything compiled in is
 // copied to NVS on the first successful join, so a later firmware that no longer carries them -
@@ -66,18 +69,108 @@ static esp_timer_handle_t s_fallback_timer;
  * what a browser is left holding when DHCP hands out a different one. Failing is not fatal - the
  * IP still works - so nothing here stops the boot.
  */
+static bool s_announced = false;
+
 static void announce_ourselves(void)
 {
-    if (mdns_init() != ESP_OK) {
-        ESP_LOGW(TAG, "No mDNS - reachable by address only");
-        return;
+    if (!s_announced) {
+        if (mdns_init() != ESP_OK) {
+            ESP_LOGW(TAG, "No mDNS - reachable by address only");
+            return;
+        }
+
+        mdns_instance_name_set("Marstek BLE Bridge");
+        mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
+        s_announced = true;
     }
 
-    mdns_hostname_set(MDNS_HOSTNAME);
-    mdns_instance_name_set("Marstek BLE Bridge");
-    mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
+    mdns_hostname_set(s_hostname);
 
-    ESP_LOGI(TAG, "Also reachable as %s.local", MDNS_HOSTNAME);
+    ESP_LOGI(TAG, "Also reachable as %s.local", s_hostname);
+}
+
+/**
+ * A name that can safely be a DNS label and a WiFi hostname.
+ *
+ * Deliberately narrower than the standard allows: lower case only, so nobody has to remember the
+ * capitalisation of something they will type into an address bar, and no leading or trailing
+ * hyphen, which some resolvers refuse outright.
+ */
+static bool hostname_is_valid(const char *name)
+{
+    const size_t len = name ? strlen(name) : 0;
+
+    if (len == 0 || len >= WIFI_HOSTNAME_MAX) {
+        return false;
+    }
+    if (name[0] == '-' || name[len - 1] == '-') {
+        return false;
+    }
+
+    for (size_t i = 0; i < len; i++) {
+        const char c = name[i];
+        const bool allowed = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+        if (!allowed) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static void hostname_load(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
+        size_t len = sizeof(s_hostname);
+        if (nvs_get_str(nvs, NVS_KEY_HOSTNAME, s_hostname, &len) != ESP_OK) {
+            s_hostname[0] = '\0';
+        }
+        nvs_close(nvs);
+    }
+
+    if (!hostname_is_valid(s_hostname)) {
+        strlcpy(s_hostname, DEFAULT_HOSTNAME, sizeof(s_hostname));
+    }
+}
+
+const char *wifi_hostname(void)
+{
+    return s_hostname;
+}
+
+esp_err_t wifi_set_hostname(const char *name)
+{
+    if (!hostname_is_valid(name)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = nvs_set_str(nvs, NVS_KEY_HOSTNAME, name);
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    strlcpy(s_hostname, name, sizeof(s_hostname));
+
+    // mDNS takes the new name straight away. What the router lists does not: that name went out
+    // with the DHCP request and is only re-sent on the next lease.
+    if (s_announced) {
+        mdns_hostname_set(s_hostname);
+    }
+
+    ESP_LOGI(TAG, "Renamed to %s.local", s_hostname);
+    return ESP_OK;
 }
 
 static void credentials_load(void)
@@ -446,6 +539,7 @@ esp_err_t wifi_start(void)
         return ESP_ERR_NO_MEM;
     }
 
+    hostname_load();
     credentials_load();
 
     const esp_timer_create_args_t retry_args = {
@@ -467,7 +561,7 @@ esp_err_t wifi_start(void)
 
     // What the router shows in its client list. Separate from mDNS, and set before the interface
     // comes up because the name goes out with the DHCP request.
-    esp_netif_set_hostname(station, MDNS_HOSTNAME);
+    esp_netif_set_hostname(station, s_hostname);
 
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&init));
