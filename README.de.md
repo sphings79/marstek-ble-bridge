@@ -52,7 +52,7 @@ Netzwerk weiter und liefert [Marstek BLE Control](https://github.com/sphings79/m
 
 <div align="center">
 
-<img alt="Das Bedienfeld über die Bridge auf einem Smartphone: Ladezustand, Batterie- und Netzleistung, und das WLAN-Signal der Bridge neben dem Bluetooth-Signal" src="https://raw.githubusercontent.com/sphings79/marstek-ble-bridge/master/docs/img/dashboard-mobile.png" height="620">
+<img alt="Das Bedienfeld über die Bridge auf einem Smartphone: Ladezustand, Batterie- und Netzleistung, und das WLAN-Signal der Bridge neben dem Bluetooth-Signal" src="https://raw.githubusercontent.com/sphings79/marstek-ble-bridge/master/docs/img/dashboard-mobile-de.png" height="620">
 
 </div>
 
@@ -61,7 +61,7 @@ Netzwerk weiter und liefert [Marstek BLE Control](https://github.com/sphings79/m
 
 <div align="center">
 
-<img alt="Das vollständige von der Bridge ausgelieferte Bedienfeld, am Ende die Karten Bridge Firmware und Bridge Password" src="https://raw.githubusercontent.com/sphings79/marstek-ble-bridge/master/docs/img/dashboard-desktop.png" width="100%">
+<img alt="Das vollständige von der Bridge ausgelieferte Bedienfeld, am Ende die Karten Bridge Firmware und Bridge Password" src="https://raw.githubusercontent.com/sphings79/marstek-ble-bridge/master/docs/img/dashboard-desktop-de.png" width="100%">
 
 </div>
 
@@ -115,6 +115,9 @@ entwickelt wurde auf einem — sind aber die unbequeme Wahl: kleine Antenne, und
 die einbricht, sobald das Funkmodul anläuft. Deshalb ist die Sendeleistung ab Werk niedrig
 gedeckelt; bei solidem Netzteil `BRIDGE_WIFI_MAX_TX_POWER` hochsetzen und die Reichweite
 zurückholen.
+
+Die ausgelieferte Oberfläche gibt es auf **Englisch und Deutsch** — sie richtet sich nach dem
+Browser und ist jederzeit umschaltbar.
 
 ## Updates
 

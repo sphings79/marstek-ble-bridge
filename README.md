@@ -114,6 +114,9 @@ developed on one — but they are the awkward choice: small antenna, and a 5 V r
 the moment the radio starts. Which is why transmit power ships capped low; if your supply is
 solid, raise `BRIDGE_WIFI_MAX_TX_POWER` and get the range back.
 
+The interface it serves is in **English and German**, following the browser and switchable at any
+time.
+
 ## Updates
 
 The bridge updates itself over WiFi. New releases show up in the interface with a link to the
