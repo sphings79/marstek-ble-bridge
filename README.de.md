@@ -122,7 +122,7 @@ Browser und ist jederzeit umschaltbar.
 ## Updates
 
 Die Bridge aktualisiert sich selbst über WLAN. Neue Releases erscheinen in der Oberfläche mit Link
-zum Changelog, und sie lädt und installiert sie eigenständig.
+zum [Changelog](CHANGELOG.md), und sie lädt und installiert sie eigenständig.
 
 Firmware landet in dem Slot, aus dem sie gerade nicht läuft, und wird erst gestartet, wenn sie
 vollständig ist — ein abgebrochenes Update ändert also nichts. Eine Firmware, die zwar startet,

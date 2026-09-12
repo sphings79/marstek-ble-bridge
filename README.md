@@ -120,7 +120,7 @@ time.
 ## Updates
 
 The bridge updates itself over WiFi. New releases show up in the interface with a link to the
-changelog, and it downloads and installs them on its own.
+[changelog](CHANGELOG.md), and it downloads and installs them on its own.
 
 Firmware goes into the slot it is not running from and is only booted once it is complete, so a
 failed update changes nothing. A firmware that boots but cannot be reached falls back to the
