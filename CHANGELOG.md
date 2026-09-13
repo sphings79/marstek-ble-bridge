@@ -6,6 +6,12 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.3.7 — 2026-09-13
+- The offered update shows a real progress bar: the bridge streams its download-and-flash progress
+  as it runs, so the bar fills with a percentage instead of an indeterminate one.
+- After a web-interface update the page reloads itself, so the freshly installed interface takes
+  over instead of the old one lingering in the tab.
+
 ## v1.3.6 — 2026-09-12
 - Settings hold the value you applied until the next poll lands, instead of flashing the device's
   old value for a moment (self-consumption offset and local-API fields).
