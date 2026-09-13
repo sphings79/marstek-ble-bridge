@@ -6,6 +6,11 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.3.8 — 2026-09-13
+- EMS, BMS and Micro-Inverter (VNS) updates are hardware-confirmed on a Venus D and a Venus E 3.0,
+  so the VNS firmware-update note is a plain info line instead of a "not confirmed on real hardware"
+  warning. MPPT keeps the caution, only because no MPPT image is in the firmware archive to flash yet.
+
 ## v1.3.7 — 2026-09-13
 - The offered update shows a real progress bar: the bridge streams its download-and-flash progress
   as it runs, so the bar fills with a percentage instead of an indeterminate one.
