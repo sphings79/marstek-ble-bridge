@@ -295,7 +295,25 @@ static esp_err_t version_get(httpd_req_t *req)
  * running WiFi and a Bluetooth stack, and an update that runs out of memory halfway is a poor
  * trade for keeping a connection that reconnects by itself.
  */
-static esp_err_t fetch_firmware(const char *url, char *err, size_t err_len)
+// Streams a progress line to the client mid-download. Throttled to whole-percent steps, so a large
+// image is a hundred short chunks rather than thousands. A send failure (the client walked away)
+// is ignored on purpose - the flash still runs to the end regardless of who is watching.
+static void emit_progress(httpd_req_t *req, int *last_pct, int done, int total)
+{
+    if (!req || total <= 0) {
+        return;
+    }
+    const int pct = (int) ((int64_t) done * 100 / total);
+    if (pct == *last_pct) {
+        return;
+    }
+    *last_pct = pct;
+    char line[24];
+    const int n = snprintf(line, sizeof(line), "P %d\n", pct);
+    httpd_resp_send_chunk(req, line, n);
+}
+
+static esp_err_t fetch_firmware(httpd_req_t *req, const char *url, char *err, size_t err_len)
 {
     esp_http_client_config_t http = {
         .url = url,
@@ -311,15 +329,46 @@ static esp_err_t fetch_firmware(const char *url, char *err, size_t err_len)
 
     esp_https_ota_config_t cfg = { .http_config = &http };
 
-    esp_err_t result = esp_https_ota(&cfg);
-    if (result != ESP_OK) {
-        snprintf(err, err_len, "%s", esp_err_to_name(result));
+    // The step-by-step form of the OTA, rather than the all-in-one esp_https_ota(), so the bytes
+    // read can be reported as they arrive. esp_https_ota_finish() sets the boot partition; a failed
+    // or incomplete transfer is aborted and leaves the running slot untouched.
+    esp_https_ota_handle_t handle = NULL;
+    esp_err_t result = esp_https_ota_begin(&cfg, &handle);
+    if (result != ESP_OK || handle == NULL) {
+        snprintf(err, err_len, "begin: %s", esp_err_to_name(result));
+        return result == ESP_OK ? ESP_FAIL : result;
+    }
+
+    const int total = esp_https_ota_get_image_size(handle);
+    int last_pct = -1;
+
+    while (1) {
+        result = esp_https_ota_perform(handle);
+        if (result != ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
+            break;
+        }
+        emit_progress(req, &last_pct, esp_https_ota_get_image_len_read(handle), total);
+    }
+
+    if (result == ESP_OK && esp_https_ota_is_complete_data_received(handle)) {
+        result = esp_https_ota_finish(handle);
+        if (result != ESP_OK) {
+            snprintf(err, err_len, "finish: %s", esp_err_to_name(result));
+        }
+    } else {
+        if (err[0] == 0) {
+            snprintf(err, err_len, "%s", esp_err_to_name(result));
+        }
+        esp_https_ota_abort(handle);
+        if (result == ESP_OK) {
+            result = ESP_FAIL;
+        }
     }
 
     return result;
 }
 
-static esp_err_t fetch_web(const char *url, char *err, size_t err_len)
+static esp_err_t fetch_web(httpd_req_t *req, const char *url, char *err, size_t err_len)
 {
     const esp_partition_t *web = esp_partition_find_first(
         ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, "web");
@@ -381,6 +430,7 @@ static esp_err_t fetch_web(const char *url, char *err, size_t err_len)
     result = esp_partition_erase_range(web, 0, web->size);
 
     int offset = 0;
+    int last_pct = -1;
     while (result == ESP_OK && offset < total) {
         const int got = esp_http_client_read(client, s_buf, CHUNK);
         if (got <= 0) {
@@ -390,6 +440,7 @@ static esp_err_t fetch_web(const char *url, char *err, size_t err_len)
         }
         result = esp_partition_write(web, offset, s_buf, got);
         offset += got;
+        emit_progress(req, &last_pct, offset, total);
     }
 
     esp_http_client_close(client);
@@ -445,18 +496,23 @@ static esp_err_t update_from_url_post(httpd_req_t *req)
     ESP_LOGI(TAG, "Fetching %s image from %s", want_web ? "web" : "firmware", url_copy);
     ble_central_disconnect();
 
+    // The download runs in this handler and holds the single web-server task the whole time, so a
+    // separate progress poll could never be answered. Instead the response itself is a live feed:
+    // "P <percent>" lines as the flash fills, closed by "OK" or "E <error>". The status is 200 the
+    // moment the first line goes out, so failures are reported in-band, not by HTTP status.
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
     char err[96] = { 0 };
-    const esp_err_t result = want_web ? fetch_web(url_copy, err, sizeof(err))
-                                      : fetch_firmware(url_copy, err, sizeof(err));
+    const esp_err_t result = want_web ? fetch_web(req, url_copy, err, sizeof(err))
+                                      : fetch_firmware(req, url_copy, err, sizeof(err));
 
     if (result != ESP_OK) {
         ESP_LOGE(TAG, "Update from url failed: %s", err);
-        httpd_resp_set_status(req, "502 Bad Gateway");
-        httpd_resp_set_type(req, "application/json");
-
-        char response[160];
-        snprintf(response, sizeof(response), "{\"ok\":false,\"error\":\"%s\"}", err);
-        httpd_resp_sendstr(req, response);
+        char line[128];
+        const int n = snprintf(line, sizeof(line), "E %s\n", err);
+        httpd_resp_send_chunk(req, line, n);
+        httpd_resp_send_chunk(req, NULL, 0);
         return ESP_OK;
     }
 
@@ -466,8 +522,8 @@ static esp_err_t update_from_url_post(httpd_req_t *req)
         remember_web_version(tag);
     }
 
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"ok\":true,\"restarting\":true}");
+    httpd_resp_send_chunk(req, "OK\n", 3);
+    httpd_resp_send_chunk(req, NULL, 0);
 
     const esp_timer_create_args_t args = { .callback = &reboot_soon, .name = "url_reboot" };
     esp_timer_handle_t timer;
