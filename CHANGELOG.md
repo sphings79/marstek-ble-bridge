@@ -6,6 +6,12 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.3.9 — 2026-09-14
+- The fallback setup access point `Marstek-Bridge-XXXX` is now an open network instead of WPA2 with
+  a fixed, undocumented password, so provisioning over it is no longer a dead end. The setup page,
+  and the bridge password set from it, remain the real gate. (Firmware only; the web interface is
+  unchanged from v1.3.8.)
+
 ## v1.3.8 — 2026-09-13
 - EMS, BMS and Micro-Inverter (VNS) updates are hardware-confirmed on a Venus D and a Venus E 3.0,
   so the VNS firmware-update note is a plain info line instead of a "not confirmed on real hardware"
