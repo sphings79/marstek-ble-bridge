@@ -91,6 +91,9 @@ Flashed some other way, or no serial provisioning? The bridge opens its own acce
 `Marstek-Bridge-XXXX` — an open network, nothing to type to join — and its setup page (at
 `http://marstek-bridge.local/`, or `http://192.168.4.1/`) takes the network from there.
 
+> On firmware **up to v1.3.8** this access point was WPA2-protected — the password was
+> `marstek-bridge`. **From v1.3.9** it is open and no password is needed.
+
 The status LED says where it is without a console:
 
 | Blink | Meaning |

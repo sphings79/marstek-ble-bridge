@@ -92,6 +92,9 @@ Anders geflasht oder keine serielle Provisionierung? Dann macht die Bridge einen
 auf, `Marstek-Bridge-XXXX` — ein offenes Netz, kein Passwort nötig — und die Setup-Seite dort (unter
 `http://marstek-bridge.local/` bzw. `http://192.168.4.1/`) nimmt das Netzwerk entgegen.
 
+> Bei Firmware **bis v1.3.8** war dieser Accesspoint WPA2-geschützt — das Passwort war
+> `marstek-bridge`. **Ab v1.3.9** ist er offen, es wird kein Passwort mehr benötigt.
+
 Die Status-LED sagt ohne Konsole, wo sie steht:
 
 | Blinken | Bedeutung |
