@@ -59,11 +59,12 @@ menu "Marstek BLE Bridge"
 
     config BRIDGE_FALLBACK_AP_PASSWORD
         string "Password of the fallback access point"
-        default "marstek-bridge"
+        default ""
         help
-            At least 8 characters, or the access point will be open to anyone in range. It only
-            serves the same web interface, which has its own login - but on an unclaimed bridge
-            that login is still up for grabs during the claim window.
+            Leave empty (the default) for an open setup access point - nothing to type to join, which
+            is how Shelly, Tasmota and the like do it. It only serves the setup page, and the bridge's
+            own password is set from there. Set 8+ characters to protect it with WPA2 instead; on an
+            unclaimed bridge the setup page is still reachable to whoever is on the AP until claimed.
 
     config BRIDGE_STATUS_LED_ENABLED
         bool "Blink a status LED"

@@ -88,7 +88,8 @@ detail stays in the web app, where it is already maintained, in one place, in on
 3. **Pick your storage** from the scan and connect.
 
 Flashed some other way, or no serial provisioning? The bridge opens its own access point,
-`Marstek-Bridge-XXXX`, and its setup page takes the network from there.
+`Marstek-Bridge-XXXX` — an open network, nothing to type to join — and its setup page (at
+`http://marstek-bridge.local/`, or `http://192.168.4.1/`) takes the network from there.
 
 The status LED says where it is without a console:
 

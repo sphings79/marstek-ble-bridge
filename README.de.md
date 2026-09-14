@@ -89,7 +89,8 @@ einer Sprache.
 3. **Speicher auswählen** und verbinden.
 
 Anders geflasht oder keine serielle Provisionierung? Dann macht die Bridge einen eigenen Accesspoint
-auf, `Marstek-Bridge-XXXX`, und die Setup-Seite dort nimmt das Netzwerk entgegen.
+auf, `Marstek-Bridge-XXXX` — ein offenes Netz, kein Passwort nötig — und die Setup-Seite dort (unter
+`http://marstek-bridge.local/` bzw. `http://192.168.4.1/`) nimmt das Netzwerk entgegen.
 
 Die Status-LED sagt ohne Konsole, wo sie steht:
 
