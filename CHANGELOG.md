@@ -6,6 +6,13 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.3.11 — 2026-10-01
+- The header shows the Bluetooth symbol instead of the cellular bars, and Bluetooth and WiFi are just
+  the dBm value; the tooltip says which link it is.
+- On a phone the device header scrolls away and only the section bar stays pinned. It now carries the
+  Bluetooth and WiFi signal readings, so they remain visible.
+  (Web interface only; the firmware is unchanged from v1.3.9.)
+
 ## v1.3.10 — 2026-10-01
 - Firmware update: the technical notes about the Micro/Inverter component are gone, and starting an
   update always asks one short "really start?" question. After a finished update the loaded file is
