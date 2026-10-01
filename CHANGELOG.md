@@ -6,6 +6,13 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.3.15 — 2026-10-01
+- The firmware archive picker groups the images by component in collapsible sections, marks the
+  version that is installed on the device, and uses the card styling of the rest of the page.
+- Test builds show as 149.2 (Beta) instead of 1492, in the archive picker and in the device info.
+- Factory reset: the buttons sit at the top of the card, and the second one says it deletes all data.
+  (Web interface only; the firmware is unchanged from v1.3.9.)
+
 ## v1.3.14 — 2026-10-01
 - New "Pick from archive" button on the firmware update card: lists the images for the connected model
   (Control, BMS, Micro) straight from the firmware archive on GitHub, newest first with release notes,
