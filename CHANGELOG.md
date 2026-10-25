@@ -6,6 +6,12 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.3.16 — 2026-10-25
+- The web interface now detects the bridge when it is served over https, for example behind a TLS
+  reverse proxy such as Caddy. Before, it always fell back to Web Bluetooth there, and showed
+  "Browser not supported" in Safari and Firefox.
+  (Web interface only; the firmware is unchanged from v1.3.9.)
+
 ## v1.3.15 — 2026-10-01
 - The firmware archive picker groups the images by component in collapsible sections, marks the
   version that is installed on the device, and uses the card styling of the rest of the page.
