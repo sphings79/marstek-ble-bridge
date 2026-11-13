@@ -6,6 +6,18 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.3.17 — 2026-11-13
+- Venus E v1/v2 (`MST_ACCP_xxxx`, device type HMG-50) gets its own view. **Not tested on real
+  hardware**: it is based on reading the Control firmware only. Work mode including economy/AI, power
+  class (800 / 2500 W), charge and discharge limits, backup power, depth of discharge (30–90 %,
+  firmware 156+), Bluetooth switch (156+), CT mode and readings, local API and set time.
+- Not offered for it because the firmware has no such command, or it could not be confirmed: peak
+  shaving, self-control offset, surplus feed-in, battery modules, OTA, factory reset, CT meter type,
+  LED switch.
+- Firmware files named `ac_app_…` are no longer taken for a Venus E 3.0; Venus E v1/v2 control images
+  are recognised by their `MST_ACCP` tag.
+  (Web interface only; the firmware is unchanged from v1.3.9.)
+
 ## v1.3.16 — 2026-10-25
 - The web interface now detects the bridge when it is served over https, for example behind a TLS
   reverse proxy such as Caddy. Before, it always fell back to Web Bluetooth there, and showed
