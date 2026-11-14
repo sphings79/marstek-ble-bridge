@@ -6,6 +6,11 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.3.18 — 2026-11-14
+- Firmware upload: replies are now checked for the right frame after reassembly, so a stray or split
+  frame can no longer be mistaken for the acknowledgement of a block (fix by Ruben J. Jongejan).
+  (Web interface only; the firmware is unchanged from v1.3.9.)
+
 ## v1.3.17 — 2026-11-13
 - Venus E v1/v2 (`MST_ACCP_xxxx`, device type HMG-50) gets its own view. **Not tested on real
   hardware**: it is based on reading the Control firmware only. Work mode including economy/AI, power
