@@ -165,6 +165,8 @@ idf.py build flash monitor
 app with a base path of `/`, drops the Web Bluetooth help image a bridge can never need, and gzips
 the rest — about 200 KB instead of a megabyte.
 
+See [RELEASING.md](RELEASING.md) for the full release routine, which keeps this bridge, the Control app and its hosted copy on the same state.
+
 Leave the WiFi fields in `menuconfig` empty unless you are flashing by cable and would rather not
 provision afterwards. Anything set there is written into NVS on the first successful join, so an
 update to a normal build keeps the network.

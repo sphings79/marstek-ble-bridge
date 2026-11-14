@@ -10,3 +10,6 @@ dependencies.lock
 # The web partition is filled from the marstek-ble-control build, not kept here.
 web/*
 !web/.gitkeep
+
+# Local settings of tools/release.sh (paths, hosting access).
+tools/release.local.env

@@ -168,6 +168,8 @@ idf.py build flash monitor
 Basispfad `/`, wirft das Web-Bluetooth-Hilfebild raus, das eine Bridge nie braucht, und gzippt den
 Rest — rund 200 KB statt einem Megabyte.
 
+Den vollständigen Release-Ablauf, der Bridge, Control-App und die gehostete Kopie auf demselben Stand hält, beschreibt [RELEASING.de.md](RELEASING.de.md).
+
 Die WLAN-Felder in `menuconfig` leer lassen, außer du flashst per Kabel und willst dir das
 Einrichten danach sparen. Was dort steht, wird beim ersten erfolgreichen Verbinden ins NVS
 geschrieben — ein Update auf einen normalen Build behält das Netzwerk also.
