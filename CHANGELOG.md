@@ -6,6 +6,16 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.19 — 2026-11-16
+**Beta.** Diagnostic build; bridge and web interface only work together.
+- `/api/experiment` bit 32 (`set=32`): right after connecting, the bridge sends the two link-layer
+  requests the vendor app's phone sends according to the capture: LE Read Remote Features and Read Remote
+  Version Information. Values go up to 63.
+- What the last runs showed: with `set=8`, `15` and `16` (the vendor app's whole session replayed, with the
+  web app's commands dropped) the Venus D still stopped answering 28.8-28.9 s after connecting, to the
+  tenth of a second. So it is not the commands; something in the connection itself differs from the
+  vendor app's.
+
 ## v1.4.0-beta.18 — 2026-11-16
 **Beta.** Diagnostic build; bridge and web interface only work together.
 - `/api/experiment` bit 16 (`set=16`): the bridge replays the vendor app's whole session from a Bluetooth

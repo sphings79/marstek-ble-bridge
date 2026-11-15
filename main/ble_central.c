@@ -91,6 +91,7 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg);
 #define EXP_APP_READS 4
 #define EXP_APP_HEARTBEAT 8
 #define EXP_APP_REPLAY 16
+#define EXP_REMOTE_INFO 32
 
 static uint8_t s_experiment = 0;
 static bool s_random_address_ready = false;
@@ -489,6 +490,48 @@ static void start_replay(uint8_t slot)
     s_replay_pos[slot] = 0;
     esp_timer_stop(s_replay_timer[slot]);
     esp_timer_start_once(s_replay_timer[slot], (uint64_t) s_replay_steps[0].delay_ms * 1000);
+}
+
+/**
+ * What the vendor app's phone does at the link layer right after connecting, according to the
+ * capture: HCI LE Read Remote Features at +0.07 s and Read Remote Version Information at +0.78 s.
+ * NimBLE has no call for them, but the function that sends HCI commands is in the library; it is
+ * only declared in a private header.
+ */
+extern int ble_hs_hci_cmd_tx(uint16_t opcode, const void *cmd, uint8_t cmd_len, void *rsp, uint8_t rsp_len);
+
+#define HCI_OP_LE_READ_REMOTE_FEATURES 0x2016
+#define HCI_OP_READ_REMOTE_VERSION 0x041D
+
+static esp_timer_handle_t s_remote_timer[BLE_MAX_SLOTS];
+
+static void send_remote_info(uint16_t conn_handle, uint16_t opcode)
+{
+    const uint8_t cmd[2] = { (uint8_t) (conn_handle & 0xff), (uint8_t) (conn_handle >> 8) };
+    const int rc = ble_hs_hci_cmd_tx(opcode, cmd, sizeof(cmd), NULL, 0);
+    ESP_LOGI(TAG, "HCI command 0x%04x for the remote info: %d", (unsigned) opcode, rc);
+}
+
+static void remote_version(void *arg)
+{
+    const uint8_t slot = slot_of(arg);
+    if (s_slots[slot].conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        send_remote_info(s_slots[slot].conn_handle, HCI_OP_READ_REMOTE_VERSION);
+    }
+}
+
+static void start_remote_info(uint8_t slot, uint16_t conn_handle)
+{
+    send_remote_info(conn_handle, HCI_OP_LE_READ_REMOTE_FEATURES);
+
+    if (!s_remote_timer[slot]) {
+        const esp_timer_create_args_t args = { .callback = &remote_version, .arg = arg_of(slot), .name = "ble_remote" };
+        if (esp_timer_create(&args, &s_remote_timer[slot]) != ESP_OK) {
+            return;
+        }
+    }
+    esp_timer_stop(s_remote_timer[slot]);
+    esp_timer_start_once(s_remote_timer[slot], 700 * 1000);
 }
 
 static void start_app_reads(uint8_t slot)
@@ -915,6 +958,9 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg)
             // connects (the vendor app's capture shows its request for 512), and answering it is
             // all the app does. Our own request would cross it; it is only a fallback now, sent
             // once the service has been found if nothing has been agreed by then.
+            if (s_experiment & EXP_REMOTE_INFO) {
+                start_remote_info(slot, s->conn_handle);
+            }
             start_param_dance(slot, s->conn_handle);
 
             // No pairing is started here. An earlier version did, on the theory that a storage

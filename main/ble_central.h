@@ -183,6 +183,8 @@ void ble_central_log_dump(ble_log_line_cb_t cb, void *ctx);
  *      every 3 s, whatever the web app does
  *  16  replay the vendor app's whole session from a capture (every command, same order and timing)
  *      and drop what the web app sends, so that only the app's traffic reaches the storage
+ *  32  right after connecting, send the two link-layer requests the vendor app's phone sends: read
+ *      the remote features and the remote version
  * Zero is the normal behaviour.
  */
 void ble_central_set_experiment(uint8_t bits);
