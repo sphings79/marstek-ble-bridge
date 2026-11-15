@@ -6,6 +6,14 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.11 — 2026-11-15
+**Beta.** Web interface only; the firmware is unchanged from v1.4.0-beta.10.
+- **Fix: the update card did not offer the newest beta.** GitHub lists releases by tag name as text,
+  not by date, so `v1.4.0-beta.9` came before `v1.4.0-beta.10` and the card offered the older one.
+  The card now offers the most recently published release. A bridge that runs an older web interface
+  cannot see this release in the card: install it once by hand (upload the two images from the release
+  page), after that the card finds new betas again.
+
 ## v1.4.0-beta.10 — 2026-11-15
 **Beta.** Bridge and web interface only work together.
 - **Fix: the storages stopped answering 30 s after connecting.** The event log pinned it down: every
