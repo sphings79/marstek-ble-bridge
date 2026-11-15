@@ -479,7 +479,7 @@ static esp_err_t peak_shaving_get(httpd_req_t *req)
 
     // What the bridge last sent. The storage does not report peak shaving back, so this is as close
     // to a state as there is - and it is empty again after a restart of the bridge.
-    char body[640];
+    char body[700];
     size_t used = (size_t) snprintf(body, sizeof(body), "{\"lastSent\":[");
     const int64_t now = esp_timer_get_time();
 
@@ -687,8 +687,8 @@ static esp_err_t experiment_get(httpd_req_t *req)
         char value[8];
         if (httpd_query_key_value(query, "set", value, sizeof(value)) == ESP_OK) {
             const int bits = atoi(value);
-            if (bits < 0 || bits > 63) {
-                send_error(req, "400 Bad Request", "set must be 0 to 63");
+            if (bits < 0 || bits > 127 || (bits & 32)) {
+                send_error(req, "400 Bad Request", "set must be 0 to 127 without bit 32");
                 return ESP_OK;
             }
             nvs_handle_t nvs;
@@ -701,10 +701,10 @@ static esp_err_t experiment_get(httpd_req_t *req)
         }
     }
 
-    char body[640];
+    char body[700];
     snprintf(body, sizeof(body),
              "{\"experiment\":%u,\"bits\":{\"1\":\"random own address\",\"2\":\"ATT MTU 512\","
-             "\"4\":\"vendor app's first reads\",\"8\":\"vendor app's 6-byte polling\",\"16\":\"replay the vendor app's whole session and drop the web app's commands\",\"32\":\"read remote features and version like the vendor app's phone\"},\"note\":\"applies to the next connection; "
+             "\"4\":\"vendor app's first reads\",\"8\":\"vendor app's 6-byte polling\",\"16\":\"replay the vendor app's whole session and drop the web app's commands\",\"64\":\"default 27-byte data length like the vendor app\"},\"note\":\"applies to the next connection; "
              "/api/experiment?set=N changes it\"}",
              (unsigned) ble_central_experiment());
     send_json_status(req, "200 OK", body);

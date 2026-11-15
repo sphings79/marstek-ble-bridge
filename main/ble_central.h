@@ -183,8 +183,9 @@ void ble_central_log_dump(ble_log_line_cb_t cb, void *ctx);
  *      every 3 s, whatever the web app does
  *  16  replay the vendor app's whole session from a capture (every command, same order and timing)
  *      and drop what the web app sends, so that only the app's traffic reaches the storage
- *  32  right after connecting, send the two link-layer requests the vendor app's phone sends: read
- *      the remote features and the remote version
+ *  64  keep the data length at the default 27 bytes, as the vendor app's connection does, instead of
+ *      letting the controller negotiate up to 251 (log: connect-start shows the suggested length;
+ *      gap-event 34 shows what was agreed, as tx octets * 256 + rx octets)
  * Zero is the normal behaviour.
  */
 void ble_central_set_experiment(uint8_t bits);

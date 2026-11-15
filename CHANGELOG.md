@@ -6,6 +6,17 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.21 — 2026-11-16
+**Beta.** Diagnostic build; bridge and web interface only work together.
+- `/api/experiment` bit 64 (`set=64`): keeps the Bluetooth data length at the default 27 bytes. A capture
+  of the vendor app shows that its connection never extends the data length (no Data Length Change
+  event, no command for it), while this bridge's controller negotiates up to 251 bytes by itself right
+  after connecting (gap event 34 in the log) - the one difference to the app's link that had not been
+  tried. `connect-start` now also shows the suggested data length; `gap-event type 34` shows what was
+  agreed, as tx octets * 256 + rx octets. Values go up to 127.
+- The experiment bit 32 of beta.19/20 (read remote features/version through an internal NimBLE call) is
+  gone: it made the host handle the connect event over and over.
+
 ## v1.4.0-beta.20 — 2026-11-16
 **Beta.** Diagnostic build; bridge and web interface only work together.
 - **Fix for `set=32` of beta.19**, which did not work: the two link-layer requests (Read Remote
