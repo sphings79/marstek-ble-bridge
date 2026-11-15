@@ -44,7 +44,7 @@ git tag "$TAG"
 trap 'echo "Build failed - removing the local tag $TAG"; git tag -d "$TAG" >/dev/null' ERR
 tools/sync-web.sh "$CONTROL_DIR" >/dev/null
 (. "$IDF_EXPORT" >/dev/null 2>&1; idf.py build >/dev/null)
-strings -a build/marstek-ble-bridge.bin | grep -qx "$TAG" || die "Firmware image does not carry version $TAG."
+strings -a build/marstek-ble-bridge.bin | grep -x "$TAG" >/dev/null || die "Firmware image does not carry version $TAG."
 trap - ERR
 
 # --- 2. Images, manifest, build info ---
