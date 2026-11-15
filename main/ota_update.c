@@ -494,7 +494,7 @@ static esp_err_t update_from_url_post(httpd_req_t *req)
     cJSON_Delete(json);
 
     ESP_LOGI(TAG, "Fetching %s image from %s", want_web ? "web" : "firmware", url_copy);
-    ble_central_disconnect_all();
+    ws_bridge_release_all();
 
     // The download runs in this handler and holds the single web-server task the whole time, so a
     // separate progress poll could never be answered. Instead the response itself is a live feed:

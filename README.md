@@ -198,6 +198,13 @@ sensor:
 storage connected for a while (default 15 s, 5-3600 s, set in the interface under *Connection*) and
 then lets go, so the vendor app can connect again. A page reload within that time keeps the link.
 
+**Keep a slot connected.** In the interface under *Connection* a slot can be set to *Keep connected
+permanently*. The bridge then connects it by itself after a restart and reconnects it after a drop
+(after 5, 10, 30 s, then every 60 s), and the hold time no longer applies to it. **While the bridge is
+connected, the manufacturer's app cannot connect: a storage only talks to one Bluetooth device at a
+time.** Disconnecting such a slot by hand makes the bridge wait 5 minutes before it reconnects. In
+`/api/status` each slot shows `keepConnected` and `nextAttemptSeconds`.
+
 ## What leaves your network
 
 Nothing. The bridge talks to your storage and to your browser. It reaches the internet for exactly

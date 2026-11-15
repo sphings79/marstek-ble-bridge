@@ -77,3 +77,23 @@ const char *ws_bridge_slot_address(uint8_t slot);
  */
 uint16_t ws_bridge_hold_seconds(void);
 esp_err_t ws_bridge_set_hold_seconds(uint16_t seconds);
+
+/**
+ * Keep a slot connected for good: the bridge connects it by itself after start and reconnects it
+ * after a drop (5, 10, 30, then every 60 s), and the hold time does not release it. Stored per
+ * slot. Costs the vendor app its access - a storage talks to one Bluetooth device at a time.
+ */
+bool ws_bridge_keep(uint8_t slot);
+esp_err_t ws_bridge_set_keep(uint8_t slot, bool keep);
+
+/** Seconds until the next automatic attempt for a kept slot, or -1 when none is pending. */
+int ws_bridge_keep_next_attempt_seconds(uint8_t slot);
+
+/**
+ * Let go of every storage and stop reconnecting kept slots until the next restart. For anything
+ * that needs the radio and the memory to itself, such as downloading an update.
+ */
+void ws_bridge_release_all(void);
+
+/** A slot was disconnected on purpose: do not reconnect it by itself for a while (kept slots only). */
+void ws_bridge_note_manual_disconnect(uint8_t slot);

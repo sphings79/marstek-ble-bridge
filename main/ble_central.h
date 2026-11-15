@@ -73,6 +73,9 @@ void ble_central_disconnect_all(void);
 
 bool ble_central_is_connected(uint8_t slot);
 
+/** A connection attempt is running or waiting its turn, or the link is up but not usable yet. */
+bool ble_central_is_busy(uint8_t slot);
+
 /** Name and address of the connected device in `slot`; empty strings when there is none. */
 const char *ble_central_device_name(uint8_t slot);
 const char *ble_central_device_address(uint8_t slot);

@@ -6,6 +6,15 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.3 — 2026-11-15
+**Beta.** Bridge and web interface only work together.
+- **Keep a slot connected permanently** (switch per slot under *Connection*): the bridge connects it by
+  itself after a restart and reconnects it after a drop (5, 10, 30 s, then every 60 s). The hold time
+  does not apply to such a slot. While the bridge is connected, the manufacturer's app cannot connect -
+  the interface says so next to the switch. `/api/status` shows `keepConnected` and
+  `nextAttemptSeconds` per slot.
+- A link that is up but still being set up is no longer mistaken for a missing one.
+
 ## v1.4.0-beta.2 — 2026-11-15
 **Beta.** Same pairing rule as beta.1: bridge and web interface only work together.
 - **Hold time is adjustable** (5-3600 s, default 15 s): how long the storages stay connected after the

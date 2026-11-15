@@ -19,8 +19,8 @@
  *   GET    /api/peak-shaving   token    last values sent per slot
  *   GET    /api/status         token    version, uptime, heap, slots, last command - for monitoring
  *   POST   /api/connection     token    {"slot":0,"action":"connect"|"disconnect"}
- *   GET    /api/settings       session  {"holdSeconds":15}
- *   POST   /api/settings       session  {"holdSeconds":n}, 5 to 3600
+ *   GET    /api/settings       session  {"holdSeconds":15,"keepConnected":[false,false,false]}
+ *   POST   /api/settings       session  {"holdSeconds":n} (5 to 3600) and/or {"keep":{"slot":n,"enabled":b}}
  *
  * Plain HTTP, like the rest of the bridge: use this on a network you trust.
  */

@@ -696,7 +696,9 @@ esp_err_t ble_central_connect(uint8_t slot, const char *address, uint8_t addr_ty
     // A second ble_gap_connect while one is outstanding just fails, so treat the repeat as a
     // no-op rather than turning it into an error the user has to interpret - and answer with the
     // state rather than with silence, which is exactly what makes it seem like nothing happened.
-    if (s->connect_pending) {
+    // The same goes for a link that is up and still being set up: a second ble_gap_connect to a
+    // device we are already connected to would fail and be reported as an error.
+    if (s->connect_pending || s->conn_handle != BLE_HS_CONN_HANDLE_NONE) {
         ESP_LOGI(TAG, "[%u] Connection attempt already running, repeating the state", slot);
         set_state(slot, BLE_STATE_CONNECTING, NULL);
         return ESP_OK;
@@ -776,6 +778,14 @@ bool ble_central_is_connected(uint8_t slot)
         return false;
     }
     return s_slots[slot].conn_handle != BLE_HS_CONN_HANDLE_NONE && s_slots[slot].tx_handle != 0;
+}
+
+bool ble_central_is_busy(uint8_t slot)
+{
+    if (!valid_slot(slot)) {
+        return false;
+    }
+    return s_slots[slot].connect_pending || s_slots[slot].conn_handle != BLE_HS_CONN_HANDLE_NONE;
 }
 
 const char *ble_central_device_name(uint8_t slot)

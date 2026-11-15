@@ -62,6 +62,19 @@ typedef struct {
 
 static binding_t s_bound[BLE_MAX_SLOTS];
 
+// Slots that are to stay connected, and the bookkeeping for reconnecting them.
+static bool s_keep[BLE_MAX_SLOTS];
+static int s_attempts[BLE_MAX_SLOTS];
+static int64_t s_next_attempt_us[BLE_MAX_SLOTS];
+static bool s_keep_paused = false;
+static esp_timer_handle_t s_keep_timer;
+
+// Pause after a slot was disconnected by hand, so that doing so is not undone a second later.
+#define KEEP_HAND_PAUSE_S 300
+// Wait after a drop before the first reconnect, then the backoff for failed attempts.
+#define KEEP_FIRST_RETRY_S 5
+static const int s_backoff_s[] = { 5, 10, 30, 60 };
+
 /**
  * NVS key for one slot's field. Slot 0 keeps the key names from when the bridge only knew one
  * storage, so an installation that is updated finds its binding where it left it.
@@ -110,8 +123,13 @@ static void load_bindings(void)
             b->type = BLE_ADDR_TYPE_UNKNOWN;
         }
 
+        binding_key(slot, "keep_conn", key, sizeof(key));
+        uint8_t keep = 0;
+        s_keep[slot] = nvs_get_u8(nvs, key, &keep) == ESP_OK && keep == 1;
+
         if (b->addr[0]) {
-            ESP_LOGI(TAG, "Slot %u is bound to %s (%s)", (unsigned) slot, b->name, b->addr);
+            ESP_LOGI(TAG, "Slot %u is bound to %s (%s)%s", (unsigned) slot, b->name, b->addr,
+                     s_keep[slot] ? ", kept connected" : "");
         }
     }
 
@@ -201,6 +219,10 @@ static void clear_binding(uint8_t slot)
     nvs_erase_key(nvs, key);
     binding_key(slot, "bound_type", key, sizeof(key));
     nvs_erase_key(nvs, key);
+    // A slot that holds nothing has nothing to keep connected.
+    binding_key(slot, "keep_conn", key, sizeof(key));
+    nvs_erase_key(nvs, key);
+    s_keep[slot] = false;
     nvs_commit(nvs);
     nvs_close(nvs);
 }
@@ -224,6 +246,115 @@ int ws_bridge_slot_for_address(const char *address)
 bool ws_bridge_slot_is_bound(uint8_t slot)
 {
     return is_bound(slot);
+}
+
+bool ws_bridge_keep(uint8_t slot)
+{
+    return slot < BLE_MAX_SLOTS && s_keep[slot];
+}
+
+esp_err_t ws_bridge_set_keep(uint8_t slot, bool keep)
+{
+    if (slot >= BLE_MAX_SLOTS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (keep && !is_bound(slot)) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    char key[16];
+    binding_key(slot, "keep_conn", key, sizeof(key));
+    err = keep ? nvs_set_u8(nvs, key, 1) : nvs_erase_key(nvs, key);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        err = ESP_OK;
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+
+    if (err == ESP_OK) {
+        s_keep[slot] = keep;
+        // Start (or stop) right away rather than at the next tick, and with a fresh backoff.
+        s_attempts[slot] = 0;
+        s_next_attempt_us[slot] = 0;
+        ESP_LOGI(TAG, "Slot %u %s", (unsigned) slot, keep ? "is now kept connected" : "is no longer kept connected");
+    }
+    return err;
+}
+
+int ws_bridge_keep_next_attempt_seconds(uint8_t slot)
+{
+    if (slot >= BLE_MAX_SLOTS || !s_keep[slot] || !is_bound(slot) || s_keep_paused ||
+        ble_central_is_connected(slot)) {
+        return -1;
+    }
+    const int64_t wait = s_next_attempt_us[slot] - esp_timer_get_time();
+    return wait > 0 ? (int) (wait / 1000000) : 0;
+}
+
+/**
+ * Bring kept slots up and back up. Once a second is plenty: the real pacing is the backoff.
+ */
+static void keep_tick(void *arg)
+{
+    (void) arg;
+
+    if (s_keep_paused) {
+        return;
+    }
+
+    const int64_t now = esp_timer_get_time();
+
+    for (uint8_t slot = 0; slot < BLE_MAX_SLOTS; slot++) {
+        if (!s_keep[slot] || !is_bound(slot)) {
+            continue;
+        }
+        if (ble_central_is_connected(slot) || ble_central_is_busy(slot)) {
+            continue;
+        }
+        if (now < s_next_attempt_us[slot]) {
+            continue;
+        }
+
+        const esp_err_t err = ble_central_connect(slot, s_bound[slot].addr, s_bound[slot].type);
+        if (err == ESP_ERR_INVALID_STATE) {
+            // Bluetooth is not up yet, which is normal in the first seconds. Not a failed attempt.
+            continue;
+        }
+
+        const int index = s_attempts[slot] < (int) (sizeof(s_backoff_s) / sizeof(s_backoff_s[0]))
+                              ? s_attempts[slot]
+                              : (int) (sizeof(s_backoff_s) / sizeof(s_backoff_s[0])) - 1;
+        s_next_attempt_us[slot] = now + (int64_t) s_backoff_s[index] * 1000000;
+        s_attempts[slot]++;
+        ESP_LOGI(TAG, "Slot %u: automatic connect (attempt %d)", (unsigned) slot, s_attempts[slot]);
+    }
+}
+
+/** Disconnecting a kept slot by hand is not meant to be undone straight away. */
+static void hold_off_reconnect(uint8_t slot)
+{
+    if (slot < BLE_MAX_SLOTS && s_keep[slot]) {
+        s_next_attempt_us[slot] = esp_timer_get_time() + (int64_t) KEEP_HAND_PAUSE_S * 1000000;
+    }
+}
+
+void ws_bridge_note_manual_disconnect(uint8_t slot)
+{
+    hold_off_reconnect(slot);
+}
+
+void ws_bridge_release_all(void)
+{
+    s_keep_paused = true;
+    ble_central_disconnect_all();
 }
 
 /* ------------------------------------------------------------------------------ sending out */
@@ -265,9 +396,13 @@ static void linger_expired(void *arg)
         return;
     }
 
-    ESP_LOGI(TAG, "Nobody came back - releasing the storages");
+    ESP_LOGI(TAG, "Nobody came back - releasing the storages that are not kept connected");
     s_link_abandoned = false;
-    ble_central_disconnect_all();
+    for (uint8_t slot = 0; slot < BLE_MAX_SLOTS; slot++) {
+        if (!s_keep[slot]) {
+            ble_central_disconnect(slot);
+        }
+    }
 }
 
 static void cancel_linger(void)
@@ -351,7 +486,11 @@ static void start_linger(void)
         if (esp_timer_create(&args, &s_linger_timer) != ESP_OK) {
             // No timer, no grace period - fall back to the old behaviour rather than holding the
             // batteries' connections forever.
-            ble_central_disconnect_all();
+            for (uint8_t slot = 0; slot < BLE_MAX_SLOTS; slot++) {
+                if (!s_keep[slot]) {
+                    ble_central_disconnect(slot);
+                }
+            }
             return;
         }
     }
@@ -557,6 +696,14 @@ static void on_ble_state(uint8_t slot, ble_state_t state, const char *msg)
 {
     send_status(slot, state, msg);
 
+    if (state == BLE_STATE_CONNECTED) {
+        s_attempts[slot] = 0;
+    } else if (state == BLE_STATE_DISCONNECTED && s_keep[slot]) {
+        // It was up and dropped: try again soon, with a fresh backoff.
+        s_attempts[slot] = 0;
+        s_next_attempt_us[slot] = esp_timer_get_time() + (int64_t) KEEP_FIRST_RETRY_S * 1000000;
+    }
+
     // Somebody asked over REST and is waiting for the outcome.
     if (s_waiting[slot] && (state == BLE_STATE_CONNECTED || state == BLE_STATE_ERROR)) {
         xSemaphoreGive(s_connect_wait[slot]);
@@ -719,6 +866,7 @@ static void handle_control(const char *text, size_t len)
         }
 
     } else if (strcmp(type->valuestring, "disconnect") == 0) {
+        hold_off_reconnect(slot);
         ble_central_disconnect(slot);
 
     } else if (strcmp(type->valuestring, "scan") == 0) {
@@ -994,6 +1142,11 @@ esp_err_t ws_bridge_start(httpd_handle_t server)
         if (s_bound[slot].name[0]) {
             ble_central_set_device_name(slot, s_bound[slot].name);
         }
+    }
+
+    const esp_timer_create_args_t keep_args = { .callback = &keep_tick, .name = "ws_keep" };
+    if (esp_timer_create(&keep_args, &s_keep_timer) == ESP_OK) {
+        esp_timer_start_periodic(s_keep_timer, 1000 * 1000);
     }
 
     const httpd_uri_t route = {

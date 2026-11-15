@@ -525,7 +525,7 @@ static esp_err_t status_get(httpd_req_t *req)
         return ESP_OK;
     }
 
-    static char body[1536];
+    static char body[2048];
     size_t used = 0;
 #define APPEND(...) do { \
         if (used < sizeof(body)) { \
@@ -552,11 +552,21 @@ static esp_err_t status_get(httpd_req_t *req)
         char name[BLE_NAME_MAX + 1], address[BLE_ADDR_STR_LEN + 1];
 
         APPEND("%s{\"slot\":%d,\"bound\":%s,\"name\":\"%s\",\"address\":\"%s\","
-               "\"connected\":%s,\"rssi\":%d,\"mtu\":%u,\"lastSent\":",
+               "\"connected\":%s,\"rssi\":%d,\"mtu\":%u,"
+               "\"keepConnected\":%s,\"nextAttemptSeconds\":",
                i ? "," : "", i, bound ? "true" : "false", json_safe(ws_bridge_slot_name((uint8_t) i), name, sizeof(name)),
                json_safe(ws_bridge_slot_address((uint8_t) i), address, sizeof(address)), connected ? "true" : "false",
                connected ? (int) ble_central_rssi((uint8_t) i) : 0,
-               connected ? (unsigned) ble_central_mtu((uint8_t) i) : 0u);
+               connected ? (unsigned) ble_central_mtu((uint8_t) i) : 0u,
+               ws_bridge_keep((uint8_t) i) ? "true" : "false");
+
+        const int next_attempt = ws_bridge_keep_next_attempt_seconds((uint8_t) i);
+        if (next_attempt >= 0) {
+            APPEND("%d", next_attempt);
+        } else {
+            APPEND("null");
+        }
+        APPEND(",\"lastSent\":");
 
         if (p->known) {
             APPEND("{\"peakShaving\":%s,\"power\":%d,\"ageSeconds\":%lld}",
@@ -622,6 +632,7 @@ static esp_err_t connection_post(httpd_req_t *req)
     cJSON_Delete(json);
 
     if (disconnect) {
+        ws_bridge_note_manual_disconnect((uint8_t) slot);
         ble_central_disconnect((uint8_t) slot);
         record_command(slot, "disconnect", ESP_OK);
     } else {
@@ -641,49 +652,99 @@ static esp_err_t connection_post(httpd_req_t *req)
 
 /* ------------------------------------------------------------------- /api/settings (session) */
 
+static void write_settings(httpd_req_t *req)
+{
+    char body[96];
+    size_t used = (size_t) snprintf(body, sizeof(body), "{\"holdSeconds\":%u,\"keepConnected\":[",
+                                    (unsigned) ws_bridge_hold_seconds());
+    for (int i = 0; i < BLE_MAX_SLOTS; i++) {
+        used += (size_t) snprintf(body + used, sizeof(body) - used, "%s%s", i ? "," : "",
+                                  ws_bridge_keep((uint8_t) i) ? "true" : "false");
+    }
+    snprintf(body + used, sizeof(body) - used, "]}");
+    send_json_status(req, "200 OK", body);
+}
+
 static esp_err_t settings_get(httpd_req_t *req)
 {
     if (!auth_guard(req)) {
         return ESP_OK;
     }
 
-    char body[48];
-    snprintf(body, sizeof(body), "{\"holdSeconds\":%u}", (unsigned) ws_bridge_hold_seconds());
-    send_json_status(req, "200 OK", body);
+    write_settings(req);
     return ESP_OK;
 }
 
+/** Either or both of {"holdSeconds":n} and {"keep":{"slot":n,"enabled":bool}}; the answer is the new state. */
 static esp_err_t settings_post(httpd_req_t *req)
 {
     if (!auth_guard(req)) {
         return ESP_OK;
     }
 
-    char body[96];
+    char body[128];
     if (!read_body(req, body, sizeof(body))) {
         send_error(req, "400 Bad Request", "A small JSON body is required");
         return ESP_OK;
     }
 
     cJSON *json = cJSON_Parse(body);
-    const cJSON *hold = json ? cJSON_GetObjectItemCaseSensitive(json, "holdSeconds") : NULL;
-    const bool valid = cJSON_IsNumber(hold) && hold->valuedouble >= 5 && hold->valuedouble <= 3600 &&
-                       hold->valuedouble == (double) (int) hold->valuedouble;
-    const int seconds = valid ? (int) hold->valuedouble : 0;
-    cJSON_Delete(json);
-
-    if (!valid) {
-        send_error(req, "400 Bad Request", "\\\"holdSeconds\\\" must be a whole number from 5 to 3600");
+    if (!json) {
+        send_error(req, "400 Bad Request", "Not valid JSON");
         return ESP_OK;
     }
-    if (ws_bridge_set_hold_seconds((uint16_t) seconds) != ESP_OK) {
+
+    const cJSON *hold = cJSON_GetObjectItemCaseSensitive(json, "holdSeconds");
+    const cJSON *keep = cJSON_GetObjectItemCaseSensitive(json, "keep");
+
+    // Check everything before changing anything, so a bad request leaves the settings as they were.
+    int hold_seconds = 0;
+    if (hold) {
+        if (!cJSON_IsNumber(hold) || hold->valuedouble < 5 || hold->valuedouble > 3600 ||
+            hold->valuedouble != (double) (int) hold->valuedouble) {
+            cJSON_Delete(json);
+            send_error(req, "400 Bad Request", "\\\"holdSeconds\\\" must be a whole number from 5 to 3600");
+            return ESP_OK;
+        }
+        hold_seconds = (int) hold->valuedouble;
+    }
+
+    int keep_slot = -1;
+    bool keep_enabled = false;
+    if (keep) {
+        const cJSON *slot_item = cJSON_GetObjectItemCaseSensitive(keep, "slot");
+        const cJSON *enabled = cJSON_GetObjectItemCaseSensitive(keep, "enabled");
+        if (!cJSON_IsNumber(slot_item) || slot_item->valuedouble < 0 || slot_item->valuedouble >= BLE_MAX_SLOTS ||
+            !cJSON_IsBool(enabled)) {
+            cJSON_Delete(json);
+            send_error(req, "400 Bad Request", "\\\"keep\\\" needs a valid \\\"slot\\\" and \\\"enabled\\\"");
+            return ESP_OK;
+        }
+        keep_slot = (int) slot_item->valuedouble;
+        keep_enabled = cJSON_IsTrue(enabled);
+        if (keep_enabled && !ws_bridge_slot_is_bound((uint8_t) keep_slot)) {
+            cJSON_Delete(json);
+            send_error(req, "409 Conflict", "Nothing is bound to that slot");
+            return ESP_OK;
+        }
+    }
+    cJSON_Delete(json);
+
+    if (!hold && !keep) {
+        send_error(req, "400 Bad Request", "Nothing to change");
+        return ESP_OK;
+    }
+
+    if (hold && ws_bridge_set_hold_seconds((uint16_t) hold_seconds) != ESP_OK) {
+        send_error(req, "500 Internal Server Error", "Could not store the setting");
+        return ESP_OK;
+    }
+    if (keep && ws_bridge_set_keep((uint8_t) keep_slot, keep_enabled) != ESP_OK) {
         send_error(req, "500 Internal Server Error", "Could not store the setting");
         return ESP_OK;
     }
 
-    char reply[48];
-    snprintf(reply, sizeof(reply), "{\"holdSeconds\":%d}", seconds);
-    send_json_status(req, "200 OK", reply);
+    write_settings(req);
     return ESP_OK;
 }
 
