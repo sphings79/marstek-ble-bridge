@@ -6,6 +6,12 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.5 — 2026-11-15
+**Beta.** Web interface only; the firmware is unchanged from v1.4.0-beta.3.
+- Going back from a beta to stable no longer ends in a dead end: with older firmware than the web
+  interface, the page offers login and the update card, and the update card warns when it offers a
+  switch between beta and stable.
+
 ## v1.4.0-beta.4 — 2026-11-15
 **Beta.** Web interface only; the firmware is unchanged from v1.4.0-beta.3.
 - The update card has a switch, *Include beta versions* (off by default): the card then offers the
