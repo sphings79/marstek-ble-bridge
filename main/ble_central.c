@@ -236,6 +236,54 @@ static void set_state(uint8_t slot, ble_state_t state, const char *msg)
     }
 }
 
+/**
+ * The vendor app, right after connecting, asks for a 7.5 ms interval and about a second later for
+ * 48.75 ms (both with a 5 s supervision timeout). Whether the Venus D cares is not known - it keeps
+ * answering the app for minutes and stops answering this bridge after about 28 s - so the bridge
+ * does the same.
+ */
+#define PARAM_RESTORE_DELAY_MS 900
+
+static esp_timer_handle_t s_param_timer[BLE_MAX_SLOTS];
+
+static void request_params(uint16_t conn_handle, uint16_t itvl)
+{
+    const struct ble_gap_upd_params params = {
+        .itvl_min = itvl,
+        .itvl_max = itvl,
+        .latency = 0,
+        .supervision_timeout = 500,
+        .min_ce_len = 0,
+        .max_ce_len = 0,
+    };
+    const int rc = ble_gap_update_params(conn_handle, &params);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "Connection update to interval %u failed: %d", (unsigned) itvl, rc);
+    }
+}
+
+static void param_restore(void *arg)
+{
+    const uint8_t slot = slot_of(arg);
+    if (s_slots[slot].conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        request_params(s_slots[slot].conn_handle, 0x0027);
+    }
+}
+
+static void start_param_dance(uint8_t slot, uint16_t conn_handle)
+{
+    if (!s_param_timer[slot]) {
+        const esp_timer_create_args_t args = { .callback = &param_restore, .arg = arg_of(slot), .name = "ble_params" };
+        if (esp_timer_create(&args, &s_param_timer[slot]) != ESP_OK) {
+            return;
+        }
+    }
+
+    request_params(conn_handle, 0x0006);
+    esp_timer_stop(s_param_timer[slot]);
+    esp_timer_start_once(s_param_timer[slot], (uint64_t) PARAM_RESTORE_DELAY_MS * 1000);
+}
+
 static void addr_to_str(const ble_addr_t *addr, char *out)
 {
     const uint8_t *v = addr->val;   /* NimBLE stores the address little-endian */
@@ -490,6 +538,9 @@ static int on_service(uint16_t conn_handle, const struct ble_gatt_error *error,
     const uint8_t slot = slot_of(arg);
 
     if (error->status == 0 && service) {
+        if (s_slots[slot].mtu <= 23) {
+            ble_gattc_exchange_mtu(conn_handle, on_mtu_exchanged, arg);
+        }
         ble_gattc_disc_all_chrs(conn_handle, service->start_handle, service->end_handle,
                                 on_characteristics, arg);
         return 0;
@@ -592,7 +643,20 @@ static esp_err_t start_connect(uint8_t slot)
     s->connect_pending = true;
     ble_central_log(BLE_EV_CONNECT_START, slot, 0, 0);
 
-    int rc = ble_gap_connect(own_addr_type, &s->target, 10000, NULL, on_gap_event_slot, arg_of(slot));
+    // The parameters the vendor app asks for (read from a Bluetooth capture of it): 30-50 ms
+    // interval, no latency, and a 5 s supervision timeout - NimBLE's default is 2.56 s.
+    const struct ble_gap_conn_params conn_params = {
+        .scan_itvl = 0x0060,
+        .scan_window = 0x0030,
+        .itvl_min = 0x0018,
+        .itvl_max = 0x0028,
+        .latency = 0,
+        .supervision_timeout = 500,
+        .min_ce_len = 0,
+        .max_ce_len = 0,
+    };
+
+    int rc = ble_gap_connect(own_addr_type, &s->target, 10000, &conn_params, on_gap_event_slot, arg_of(slot));
     if (rc != 0) {
         s_connecting = -1;
         s->connect_pending = false;
@@ -654,7 +718,11 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg)
             ble_central_log(BLE_EV_LINK_UP, slot, s->conn_handle, 0);
             log_conn_params(slot, s->conn_handle);
 
-            ble_gattc_exchange_mtu(s->conn_handle, on_mtu_exchanged, arg);
+            // No MTU request of our own yet: the Venus D asks for one itself right after it
+            // connects (the vendor app's capture shows its request for 512), and answering it is
+            // all the app does. Our own request would cross it; it is only a fallback now, sent
+            // once the service has been found if nothing has been agreed by then.
+            start_param_dance(slot, s->conn_handle);
 
             // No pairing is started here. An earlier version did, on the theory that a storage
             // might stay silent on an unencrypted link. The Venus D never answers the request,

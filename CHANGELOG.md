@@ -6,6 +6,16 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.15 — 2026-11-16
+**Beta.** Bridge and web interface only work together. A test: it is not yet known whether it helps.
+- **Connects the way the vendor app does.** A Bluetooth capture of the vendor app shows a Venus D
+  answering for minutes, while with this bridge it stops answering about 28 s after connecting (also
+  with firmware 1.3.19). The bridge now asks for the same connection parameters (30-50 ms interval,
+  5 s supervision timeout instead of NimBLE's 2.56 s), briefly requests a 7.5 ms interval right after
+  connecting and about a second later 48.75 ms, as the app does, and no longer sends its own MTU
+  request at once: the Venus D sends one itself, and the bridge only asks when nothing was agreed by
+  the time the service has been found.
+
 ## v1.4.0-beta.14 — 2026-11-15
 **Beta.** Bridge and web interface only work together. A test for the storages that stop answering.
 - **One command at a time per storage.** The event log showed that a storage drops a command that
