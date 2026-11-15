@@ -6,6 +6,14 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.20 — 2026-11-16
+**Beta.** Diagnostic build; bridge and web interface only work together.
+- **Fix for `set=32` of beta.19**, which did not work: the two link-layer requests (Read Remote
+  Features, Read Remote Version) were sent from inside the connect event, and the call waits for the
+  controller's answer, which made the host handle that event over and over until the link was dropped.
+  They are now sent from a timer 70 ms and 780 ms after connecting, as in the capture. The earlier result
+  for `set=32` is therefore not valid; test it again.
+
 ## v1.4.0-beta.19 — 2026-11-16
 **Beta.** Diagnostic build; bridge and web interface only work together.
 - `/api/experiment` bit 32 (`set=32`): right after connecting, the bridge sends the two link-layer
