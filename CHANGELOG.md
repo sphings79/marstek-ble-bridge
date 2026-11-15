@@ -6,6 +6,14 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.3.19 — 2026-11-15
+- The version is shown in the footer and at the bottom of the mobile menu.
+- Firmware update: the transfer is isolated and a fresh connection is required before the next
+  transfer or any normal command. After a successful transfer the page says the device needs about
+  1 minute to finish installing, then to reconnect and check the version; the duplicated wording
+  between the progress line and the hint is gone.
+  (Web interface only; the firmware is unchanged from v1.3.9.)
+
 ## v1.3.18 — 2026-11-14
 - Firmware upload: replies are now checked for the right frame after reassembly, so a stray or split
   frame can no longer be mistaken for the acknowledgement of a block (fix by Ruben J. Jongejan).
