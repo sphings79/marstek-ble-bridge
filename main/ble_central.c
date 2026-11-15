@@ -81,6 +81,93 @@ static size_t s_scan_count = 0;
 
 static int on_gap_event_slot(struct ble_gap_event *event, void *arg);
 
+/* ------------------------------------------------------------------------------------ event log */
+
+#define LOG_ENTRIES 160
+
+typedef struct {
+    uint32_t ms;
+    uint8_t type;
+    uint8_t slot;
+    uint16_t a;
+    uint16_t b;
+} log_entry_t;
+
+static log_entry_t s_log[LOG_ENTRIES];
+static uint32_t s_log_count = 0;
+static portMUX_TYPE s_log_lock = portMUX_INITIALIZER_UNLOCKED;
+
+void ble_central_log(ble_event_t type, uint8_t slot, uint16_t a, uint16_t b)
+{
+    // Three tasks write here: the NimBLE host, the HTTP server and the timers.
+    portENTER_CRITICAL(&s_log_lock);
+    log_entry_t *e = &s_log[s_log_count % LOG_ENTRIES];
+    e->ms = (uint32_t) (esp_timer_get_time() / 1000);
+    e->type = (uint8_t) type;
+    e->slot = slot;
+    e->a = a;
+    e->b = b;
+    s_log_count++;
+    portEXIT_CRITICAL(&s_log_lock);
+}
+
+static const char *event_name(uint8_t type)
+{
+    switch (type) {
+        case BLE_EV_CONNECT_START:   return "connect-start";
+        case BLE_EV_LINK_UP:         return "link-up";
+        case BLE_EV_CONNECT_FAILED:  return "connect-failed";
+        case BLE_EV_READY:           return "ready";
+        case BLE_EV_DISCONNECT:      return "disconnect";
+        case BLE_EV_ENC:             return "encryption";
+        case BLE_EV_MTU:             return "mtu";
+        case BLE_EV_WRITE:           return "write";
+        case BLE_EV_NOTIFY:          return "notify";
+        case BLE_EV_KEEPALIVE:       return "keepalive";
+        case BLE_EV_KEEPALIVE_MISS:  return "keepalive-miss";
+        case BLE_EV_CYCLE:           return "cycle";
+        default:                     return "?";
+    }
+}
+
+void ble_central_log_dump(ble_log_line_cb_t cb, void *ctx)
+{
+    // Copy under the lock, format outside it.
+    static log_entry_t copy[LOG_ENTRIES];
+    uint32_t count;
+
+    portENTER_CRITICAL(&s_log_lock);
+    memcpy(copy, s_log, sizeof(copy));
+    count = s_log_count;
+    portEXIT_CRITICAL(&s_log_lock);
+
+    const uint32_t shown = count < LOG_ENTRIES ? count : LOG_ENTRIES;
+    const uint32_t first = count - shown;
+
+    for (uint32_t i = 0; i < shown; i++) {
+        const log_entry_t *e = &copy[(first + i) % LOG_ENTRIES];
+        char line[96];
+
+        switch (e->type) {
+            case BLE_EV_WRITE:
+            case BLE_EV_NOTIFY:
+                snprintf(line, sizeof(line), "%9.3f s  slot %u  %-14s %u bytes, cmd 0x%02x%s\n",
+                         e->ms / 1000.0, (unsigned) e->slot, event_name(e->type), (unsigned) e->a,
+                         (unsigned) (e->b & 0xff), (e->b & 0x8000) ? " (FAILED)" : "");
+                break;
+            case BLE_EV_DISCONNECT:
+                snprintf(line, sizeof(line), "%9.3f s  slot %u  %-14s reason 0x%x\n",
+                         e->ms / 1000.0, (unsigned) e->slot, event_name(e->type), (unsigned) e->a);
+                break;
+            default:
+                snprintf(line, sizeof(line), "%9.3f s  slot %u  %-14s %u %u\n",
+                         e->ms / 1000.0, (unsigned) e->slot, event_name(e->type), (unsigned) e->a,
+                         (unsigned) e->b);
+        }
+        cb(line, ctx);
+    }
+}
+
 static void reset_link(slot_t *s)
 {
     s->conn_handle = BLE_HS_CONN_HANDLE_NONE;
@@ -165,6 +252,7 @@ static int on_mtu_exchanged(uint16_t conn_handle, const struct ble_gatt_error *e
 static void announce_connected(uint8_t slot)
 {
     ESP_LOGI(TAG, "[%u] Connected to %s (%s)", slot, s_slots[slot].name, s_slots[slot].address);
+    ble_central_log(BLE_EV_READY, slot, 0, 0);
     set_state(slot, BLE_STATE_CONNECTED, NULL);
 }
 
@@ -446,6 +534,7 @@ static esp_err_t start_connect(uint8_t slot)
 
     s_connecting = slot;
     s->connect_pending = true;
+    ble_central_log(BLE_EV_CONNECT_START, slot, 0, 0);
 
     int rc = ble_gap_connect(own_addr_type, &s->target, 10000, NULL, on_gap_event_slot, arg_of(slot));
     if (rc != 0) {
@@ -496,6 +585,7 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg)
 
             if (event->connect.status != 0) {
                 ESP_LOGE(TAG, "[%u] Connection failed: %d", slot, event->connect.status);
+                ble_central_log(BLE_EV_CONNECT_FAILED, slot, (uint16_t) event->connect.status, 0);
                 s->conn_handle = BLE_HS_CONN_HANDLE_NONE;
                 set_state(slot, BLE_STATE_ERROR, "Could not connect to the storage");
                 start_next_queued();
@@ -505,6 +595,7 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg)
             reset_link(s);
             s->conn_handle = event->connect.conn_handle;
             s->last_notify_us = esp_timer_get_time();
+            ble_central_log(BLE_EV_LINK_UP, slot, s->conn_handle, 0);
 
             ble_gattc_exchange_mtu(s->conn_handle, on_mtu_exchanged, arg);
 
@@ -540,6 +631,7 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg)
             }
             s->connect_pending = false;
             ESP_LOGI(TAG, "[%u] Disconnected, reason 0x%x", slot, event->disconnect.reason);
+            ble_central_log(BLE_EV_DISCONNECT, slot, (uint16_t) event->disconnect.reason, 0);
             reset_link(s);
             s->name[0] = '\0';
 
@@ -556,6 +648,7 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg)
 
         case BLE_GAP_EVENT_ENC_CHANGE:
             s->last_enc_status = event->enc_change.status;
+            ble_central_log(BLE_EV_ENC, slot, (uint16_t) event->enc_change.status, 0);
             {
                 struct ble_gap_conn_desc desc;
                 if (ble_gap_conn_find(s->conn_handle, &desc) == 0) {
@@ -568,6 +661,7 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg)
 
         case BLE_GAP_EVENT_MTU:
             s->mtu = event->mtu.value;
+            ble_central_log(BLE_EV_MTU, slot, event->mtu.value, 0);
             ESP_LOGI(TAG, "[%u] MTU is now %u bytes", slot, (unsigned) s->mtu);
             break;
 
@@ -580,6 +674,7 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg)
                 ble_hs_mbuf_to_flat(event->notify_rx.om, buf, sizeof(buf), NULL) == 0 &&
                 s_on_notify) {
                 s->last_notify_us = esp_timer_get_time();
+                ble_central_log(BLE_EV_NOTIFY, slot, len, len > 3 ? buf[3] : 0);
                 s->stats.notifications++;
                 s->stats.notify_bytes += len;
                 ESP_LOGD(TAG, "[%u] Notification, %u bytes", slot, (unsigned) len);
@@ -892,6 +987,9 @@ esp_err_t ble_central_write(uint8_t slot, const uint8_t *data, size_t len, bool 
     int rc = acknowledged
         ? ble_gattc_write_flat(s->conn_handle, s->tx_handle, data, len, on_write_done, arg_of(slot))
         : ble_gattc_write_no_rsp_flat(s->conn_handle, s->tx_handle, data, len);
+
+    ble_central_log(BLE_EV_WRITE, slot, (uint16_t) len,
+                    (uint16_t) ((len > 3 ? data[3] : 0) | (rc != 0 ? 0x8000 : 0)));
 
     if (rc != 0) {
         s->stats.writes_failed++;

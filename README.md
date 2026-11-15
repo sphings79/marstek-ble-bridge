@@ -139,7 +139,8 @@ slot only. An existing single-storage setup moves into slot 1 by itself when you
 
 Each connection costs RAM on the ESP32. The diagnostics endpoint (`/api/diag`, needs a login)
 reports `heap.free`, `heap.minFree` and `heap.largestBlock`, so you can see how much room is left
-with all slots connected.
+with all slots connected. `/api/log` (also needs a login) lists the newest link events with timestamps:
+connects, drops, what was written and what came back, which helps when a storage connects but stays silent.
 
 ## Home automation (REST)
 

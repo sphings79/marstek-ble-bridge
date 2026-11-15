@@ -143,7 +143,8 @@ Update von selbst in Slot 1.
 
 Jede Verbindung kostet RAM auf dem ESP32. Der Diagnose-Endpunkt (`/api/diag`, Login nötig) meldet
 `heap.free`, `heap.minFree` und `heap.largestBlock`, daran sieht man, wie viel bei verbundenen Slots
-übrig bleibt.
+übrig bleibt. `/api/log` (ebenfalls Login nötig) listet die neuesten Verbindungsereignisse mit Zeitstempel:
+Verbinden, Abbrüche, was gesendet wurde und was zurückkam. Das hilft, wenn ein Speicher verbindet, aber stumm bleibt.
 
 ## Hausautomation (REST)
 

@@ -521,7 +521,9 @@ static const char *json_safe(const char *in, char *out, size_t len)
  */
 static esp_err_t status_get(httpd_req_t *req)
 {
-    if (!token_guard(req)) {
+    // A logged-in browser may read it too: a plain address bar cannot send the token header, and
+    // the session is the stronger credential anyway.
+    if (!auth_request_is_authenticated(req) && !token_guard(req)) {
         return ESP_OK;
     }
 
@@ -651,6 +653,30 @@ static esp_err_t connection_post(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* -------------------------------------------------------------------------- /api/log (session) */
+
+static void log_line(const char *line, void *ctx)
+{
+    httpd_req_t *req = ctx;
+    httpd_resp_send_chunk(req, line, HTTPD_RESP_USE_STRLEN);
+}
+
+/** The newest link events as plain text: for reading the timing of a link that misbehaves. */
+static esp_err_t log_get(httpd_req_t *req)
+{
+    if (!auth_guard(req)) {
+        return ESP_OK;
+    }
+
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send_chunk(req, "# time since start, slot, event, details (write/notify: bytes and command byte)\n",
+                          HTTPD_RESP_USE_STRLEN);
+    ble_central_log_dump(log_line, req);
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
 /* ------------------------------------------------------------------- /api/settings (session) */
 
 static void write_settings(httpd_req_t *req)
@@ -763,6 +789,7 @@ esp_err_t rest_api_register_handlers(httpd_handle_t server)
         { .uri = "/api/peak-shaving", .method = HTTP_GET,    .handler = peak_shaving_get },
         { .uri = "/api/status",       .method = HTTP_GET,    .handler = status_get },
         { .uri = "/api/connection",   .method = HTTP_POST,   .handler = connection_post },
+        { .uri = "/api/log",          .method = HTTP_GET,    .handler = log_get },
         { .uri = "/api/settings",     .method = HTTP_GET,    .handler = settings_get },
         { .uri = "/api/settings",     .method = HTTP_POST,   .handler = settings_post },
     };

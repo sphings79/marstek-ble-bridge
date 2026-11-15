@@ -344,10 +344,13 @@ static void keepalive(uint8_t slot, int64_t now)
 
         if (++s_misses[slot] >= KEEPALIVE_MISS_LIMIT) {
             ESP_LOGW(TAG, "Slot %u went mute - cycling the link", (unsigned) slot);
+            ble_central_log(BLE_EV_CYCLE, slot, 1, 0);
             s_misses[slot] = 0;
             ble_central_disconnect(slot);
             return;
         }
+
+        ble_central_log(BLE_EV_KEEPALIVE_MISS, slot, (uint16_t) s_misses[slot], 0);
 
         // One unanswered request can be a hiccup; look again soon rather than in half a minute.
         s_next_poll_us[slot] = now + (int64_t) KEEPALIVE_REPLY_S * 1000000;
@@ -357,6 +360,7 @@ static void keepalive(uint8_t slot, int64_t now)
     if (now >= s_next_poll_us[slot]) {
         if (ble_central_write(slot, s_keepalive_packet, sizeof(s_keepalive_packet), false) == ESP_OK) {
             s_poll_sent_us[slot] = now;
+            ble_central_log(BLE_EV_KEEPALIVE, slot, 0, 0);
         }
         s_next_poll_us[slot] = now + (int64_t) KEEPALIVE_S * 1000000;
     }
@@ -549,6 +553,7 @@ static void refresh_abandoned_links(void)
 
         s_refresh_left[slot] = REFRESH_RETRIES;
         s_refresh_mask |= (uint8_t) (1u << slot);
+        ble_central_log(BLE_EV_CYCLE, slot, 2, abandoned ? 1 : 0);
         ble_central_disconnect(slot);
         any = true;
     }

@@ -6,6 +6,14 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.8 — 2026-11-15
+**Beta.** Diagnostic build; bridge and web interface only work together.
+- New `/api/log` (needs a login): the newest 160 link events with timestamps - connects, drops, every
+  write and every reply (bytes and command), keepalive results and link cycles. To find out why a
+  storage that is connected answers only a few requests.
+- `/api/status` can now also be opened in a logged-in browser; the API token is only needed for other
+  clients such as Home Assistant.
+
 ## v1.4.0-beta.7 — 2026-11-15
 **Beta.** Bridge and web interface only work together.
 - **Fix: a kept-connected slot no longer ends up connected but silent.** A link nobody talks on goes

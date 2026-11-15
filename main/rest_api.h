@@ -17,7 +17,8 @@
  *   DELETE /api/token          session  switches the token and with it the REST commands off
  *   POST   /api/peak-shaving   token    {"slot":0,"enabled":true,"power":600}
  *   GET    /api/peak-shaving   token    last values sent per slot
- *   GET    /api/status         token    version, uptime, heap, slots, last command - for monitoring
+ *   GET    /api/log            session  the newest link events as text (timing of writes, replies, drops)
+ *   GET    /api/status         token    (or session) version, uptime, heap, slots, last command - for monitoring
  *   POST   /api/connection     token    {"slot":0,"action":"connect"|"disconnect"}
  *   GET    /api/settings       session  {"holdSeconds":15,"keepConnected":[false,false,false]}
  *   POST   /api/settings       session  {"holdSeconds":n} (5 to 3600) and/or {"keep":{"slot":n,"enabled":b}}

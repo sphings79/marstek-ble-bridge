@@ -132,3 +132,29 @@ esp_err_t ble_central_write(uint8_t slot, const uint8_t *data, size_t len, bool 
  * against the wrong model.
  */
 void ble_central_set_device_name(uint8_t slot, const char *name);
+
+/**
+ * A short in-memory event log, so the timing of a misbehaving link can be read afterwards instead
+ * of guessed from totals: when a slot connected, what was written, what came back, when it dropped.
+ * The newest entries are kept; `a` and `b` mean different things per event (see the dump).
+ */
+typedef enum {
+    BLE_EV_CONNECT_START = 1,
+    BLE_EV_LINK_UP,
+    BLE_EV_CONNECT_FAILED,
+    BLE_EV_READY,
+    BLE_EV_DISCONNECT,
+    BLE_EV_ENC,
+    BLE_EV_MTU,
+    BLE_EV_WRITE,
+    BLE_EV_NOTIFY,
+    BLE_EV_KEEPALIVE,
+    BLE_EV_KEEPALIVE_MISS,
+    BLE_EV_CYCLE,
+} ble_event_t;
+
+void ble_central_log(ble_event_t type, uint8_t slot, uint16_t a, uint16_t b);
+
+/** Call `cb` with one formatted line per logged event, oldest first. */
+typedef void (*ble_log_line_cb_t)(const char *line, void *ctx);
+void ble_central_log_dump(ble_log_line_cb_t cb, void *ctx);
