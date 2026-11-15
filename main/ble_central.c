@@ -89,6 +89,7 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg);
 #define EXP_RANDOM_ADDRESS 1
 #define EXP_MTU_512 2
 #define EXP_APP_READS 4
+#define EXP_APP_HEARTBEAT 8
 
 static uint8_t s_experiment = 0;
 static bool s_random_address_ready = false;
@@ -382,6 +383,46 @@ static void send_app_read(void *arg)
     }
 }
 
+/**
+ * The vendor app's steady polling, as seen in a capture: the state (0x03) and the setting (0x0a),
+ * each as a 6-byte frame with the payload byte 0x01, one of them every 3 s. This bridge and the web
+ * app ask with a 5-byte frame without payload, and the Venus D stops answering about 28 s after
+ * connecting; the app, which keeps its connection for minutes, never sends that form after the first
+ * seconds.
+ */
+static const uint8_t s_heartbeat[][6] = {
+    { 0x73, 0x06, 0x23, 0x03, 0x01, 0x54 },
+    { 0x73, 0x06, 0x23, 0x0a, 0x01, 0x5d },
+};
+
+static esp_timer_handle_t s_beat_timer[BLE_MAX_SLOTS];
+static uint8_t s_beat_next[BLE_MAX_SLOTS];
+
+static void send_heartbeat(void *arg)
+{
+    const uint8_t slot = slot_of(arg);
+    if (!(s_experiment & EXP_APP_HEARTBEAT) || !ble_central_is_ready(slot)) {
+        return;
+    }
+
+    ble_central_write_quiet(slot, s_heartbeat[s_beat_next[slot]], sizeof(s_heartbeat[0]), false);
+    s_beat_next[slot] = (uint8_t) ((s_beat_next[slot] + 1) % 2);
+    esp_timer_start_once(s_beat_timer[slot], 3000 * 1000);
+}
+
+static void start_heartbeat(uint8_t slot)
+{
+    if (!s_beat_timer[slot]) {
+        const esp_timer_create_args_t args = { .callback = &send_heartbeat, .arg = arg_of(slot), .name = "ble_beat" };
+        if (esp_timer_create(&args, &s_beat_timer[slot]) != ESP_OK) {
+            return;
+        }
+    }
+    s_beat_next[slot] = 0;
+    esp_timer_stop(s_beat_timer[slot]);
+    esp_timer_start_once(s_beat_timer[slot], 1000 * 1000);
+}
+
 static void start_app_reads(uint8_t slot)
 {
     if (!s_reads_timer[slot]) {
@@ -402,6 +443,9 @@ static void announce_connected(uint8_t slot)
     ble_central_log(BLE_EV_READY, slot, 0, 0);
     if (s_experiment & EXP_APP_READS) {
         start_app_reads(slot);
+    }
+    if (s_experiment & EXP_APP_HEARTBEAT) {
+        start_heartbeat(slot);
     }
     set_state(slot, BLE_STATE_CONNECTED, NULL);
 }

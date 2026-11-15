@@ -179,6 +179,8 @@ void ble_central_log_dump(ble_log_line_cb_t cb, void *ctx);
  *   2  ask for an ATT MTU of 512, as the Venus D itself does, instead of 256
  *   4  after connecting, send the three read-only requests the vendor app sends in its first seconds
  *      (0x11 modem version, 0x24 VID, 0x51 vid/xid)
+ *   8  send the vendor app's steady polling: 0x03 and 0x0a as 6-byte frames with payload 0x01, one
+ *      every 3 s, whatever the web app does
  * Zero is the normal behaviour.
  */
 void ble_central_set_experiment(uint8_t bits);

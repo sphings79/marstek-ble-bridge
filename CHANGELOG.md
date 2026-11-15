@@ -6,6 +6,14 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.17 — 2026-11-16
+**Beta.** Diagnostic build; bridge and web interface only work together.
+- `/api/experiment` has a new bit, 8: the bridge sends the vendor app's steady polling itself, `0x03` and
+  `0x0a` as 6-byte frames with the payload byte `01`, one every 3 s. A capture of the vendor app shows
+  it uses only that form after its first seconds, while this bridge and the web app ask with a 5-byte
+  frame without payload, and a Venus D stops answering about 28 s after connecting. `set=1`, `2` and `4`
+  (random address, MTU 512, the app's first reads) were tried and did not help. Values go up to 15.
+
 ## v1.4.0-beta.16 — 2026-11-16
 **Beta.** Diagnostic build; bridge and web interface only work together.
 - **`/api/experiment` (needs a login):** a debug switch for the Venus D that stops answering about 28 s
