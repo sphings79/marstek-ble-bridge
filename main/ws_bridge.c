@@ -75,13 +75,12 @@ static esp_timer_handle_t s_keep_timer;
 #define KEEP_FIRST_RETRY_S 5
 static const int s_backoff_s[] = { 5, 10, 30, 60 };
 
-// A link nobody talks on goes mute: writes are accepted, nothing comes back, and only a new
-// connection helps. The web app keeps its link alive by asking for the state every few seconds -
-// but it only polls the slot that is on screen, and not at all once the browser is gone. So the
-// bridge asks, whenever a slot has been quiet for a moment: always for a slot that is kept
-// connected, and for the others while a browser is watching. A kept slot that then stays silent is
-// cycled; the others are left alone, because nobody would bring them back up.
-#define KEEPALIVE_S 4
+// A link can still stop answering - the writes are accepted and nothing comes back - and a kept
+// slot has nobody watching it. So while no browser is on the page, the bridge asks such a slot for
+// its state whenever it has been quiet for a while, and cycles the link when three requests in a
+// row stay unanswered. With a browser present it does neither: the web app is talking, and a link
+// must never be pulled out from under a firmware transfer that is waiting for the storage.
+#define KEEPALIVE_S 15
 #define KEEPALIVE_REPLY_S 3
 #define KEEPALIVE_MISS_LIMIT 3
 // A link that has said nothing for this long, while someone is supposed to be using it, is mute.
@@ -318,12 +317,13 @@ int ws_bridge_keep_next_attempt_seconds(uint8_t slot)
 
 static int client_count(void);
 
-/** Keep a connected slot talking, and cycle a kept one that stays silent. */
+/** Watch a kept slot while nobody else does, and cycle it if it stops answering. */
 static void keepalive(uint8_t slot, int64_t now)
 {
-    // Nothing to ask before the storage can answer: the subscription is part of being ready.
-    if (!ble_central_is_ready(slot)) {
+    // Only kept slots, only without a browser, and only once the storage can answer.
+    if (!s_keep[slot] || client_count() > 0 || !ble_central_is_ready(slot)) {
         s_poll_sent_us[slot] = 0;
+        s_misses[slot] = 0;
         return;
     }
 
@@ -342,8 +342,8 @@ static void keepalive(uint8_t slot, int64_t now)
         s_misses[slot]++;
         ble_central_log(BLE_EV_KEEPALIVE_MISS, slot, (uint16_t) s_misses[slot], 0);
 
-        if (s_keep[slot] && s_misses[slot] >= KEEPALIVE_MISS_LIMIT) {
-            ESP_LOGW(TAG, "Slot %u went mute - cycling the link", (unsigned) slot);
+        if (s_misses[slot] >= KEEPALIVE_MISS_LIMIT) {
+            ESP_LOGW(TAG, "Slot %u stopped answering - cycling the link", (unsigned) slot);
             ble_central_log(BLE_EV_CYCLE, slot, 1, 0);
             s_misses[slot] = 0;
             ble_central_disconnect(slot);
@@ -351,18 +351,9 @@ static void keepalive(uint8_t slot, int64_t now)
         return;
     }
 
-    // Traffic of any kind - the browser's requests, a transfer in progress - is as good as a
-    // request of ours, and a firmware transfer must never have a stray command pushed into it.
-    const int64_t last_activity = ble_central_last_notify_us(slot) > ble_central_last_write_us(slot)
-                                      ? ble_central_last_notify_us(slot)
-                                      : ble_central_last_write_us(slot);
-    if (now - last_activity < (int64_t) KEEPALIVE_S * 1000000) {
+    // Anything the storage said recently is proof enough that it is there.
+    if (now - ble_central_last_notify_us(slot) < (int64_t) KEEPALIVE_S * 1000000) {
         s_misses[slot] = 0;
-        return;
-    }
-
-    // Only a kept slot is asked for when nobody is watching; the others are released shortly.
-    if (!s_keep[slot] && client_count() == 0) {
         return;
     }
 

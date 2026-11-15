@@ -6,6 +6,18 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.10 — 2026-11-15
+**Beta.** Bridge and web interface only work together.
+- **Fix: the storages stopped answering 30 s after connecting.** The event log pinned it down: every
+  connection went silent at exactly the moment its pairing timed out. The bridge started a pairing on
+  every new link, the Venus D never answers it, and when the pairing gives up the storage stops
+  answering on that link. The bridge no longer starts a pairing. (The 4 s keepalive of beta.9 treated
+  a symptom and is gone.)
+- A kept slot is watched only while no browser is on the page: after 15 s without a reply the bridge
+  asks for the state, and cycles the link after three unanswered requests in a row. Its own request
+  no longer resets the miss counter, and a link is never cycled while a browser, and with it
+  possibly a firmware transfer, is on the page.
+
 ## v1.4.0-beta.9 — 2026-11-15
 **Beta.** Bridge and web interface only work together.
 - **Fix: connected slots no longer go silent.** The event log of beta.8 showed it: a storage answers

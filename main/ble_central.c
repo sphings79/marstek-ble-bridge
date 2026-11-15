@@ -607,16 +607,11 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg)
 
             ble_gattc_exchange_mtu(s->conn_handle, on_mtu_exchanged, arg);
 
-            // Browsers and BlueZ negotiate this transparently when a device asks for it, so a
-            // storage that stays silent on an unencrypted link looks perfectly connected from
-            // here. Asking costs nothing if the device does not care.
-            {
-                const int sec = ble_gap_security_initiate(s->conn_handle);
-                if (sec != 0 && sec != BLE_HS_EALREADY) {
-                    ESP_LOGW(TAG, "[%u] Could not start pairing: %d", slot, sec);
-                }
-            }
-
+            // No pairing is started here. An earlier version did, on the theory that a storage
+            // might stay silent on an unencrypted link. The Venus D never answers the request,
+            // and 30 s later - when the pairing times out - it stops answering anything on that
+            // link: the event log showed every connection going quiet at exactly that moment, and
+            // coming back with the next connection. Without the request the link stays usable.
             ESP_LOGI(TAG, "[%u] Link up, discovering services", slot);
             {
                 const ble_uuid16_t svc = BLE_UUID16_INIT(SVC_UUID);

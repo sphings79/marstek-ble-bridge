@@ -203,7 +203,7 @@ then lets go, so the vendor app can connect again. A page reload within that tim
 permanently*. The bridge then connects it by itself after a restart and reconnects it after a drop
 (after 5, 10, 30 s, then every 60 s), and the hold time no longer applies to it. **While the bridge is
 connected, the manufacturer's app cannot connect: a storage only talks to one Bluetooth device at a
-time.** The storage goes mute on a link nobody talks on, so the bridge asks such a slot for its state every few seconds whenever it is quiet, and cycles the link when three answers in a row stay away. Disconnecting such a slot by hand makes the bridge wait 5 minutes before it reconnects. In
+time.** While no browser is on the page, the bridge asks such a slot for its state when it has been quiet for 15 s, and cycles the link when three requests in a row stay unanswered. Disconnecting such a slot by hand makes the bridge wait 5 minutes before it reconnects. In
 `/api/status` each slot shows `keepConnected` and `nextAttemptSeconds`.
 
 ## What leaves your network

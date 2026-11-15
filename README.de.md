@@ -208,7 +208,7 @@ innerhalb dieser Zeit behält die Verbindung.
 *Dauerhaft verbunden halten* stellen. Die Bridge verbindet ihn dann nach einem Neustart selbst und
 verbindet ihn nach einem Abbruch neu (nach 5, 10, 30 s, danach alle 60 s); die Haltezeit gilt für ihn
 nicht mehr. **Solange die Bridge verbunden ist, kann sich die Hersteller-App nicht verbinden: Ein
-Speicher spricht immer nur mit einem Bluetooth-Gerät.** Der Speicher verstummt auf einer Verbindung, auf der niemand spricht. Deshalb fragt die Bridge so einen Slot alle paar Sekunden nach seinem Zustand, sobald es still ist, und verbindet neu, wenn drei Antworten in Folge ausbleiben. Trennt man so einen Slot von Hand, wartet die
+Speicher spricht immer nur mit einem Bluetooth-Gerät.** Solange kein Browser auf der Seite ist, fragt die Bridge so einen Slot nach seinem Zustand, wenn er 15 s still war, und verbindet neu, wenn drei Anfragen in Folge unbeantwortet bleiben. Trennt man so einen Slot von Hand, wartet die
 Bridge 5 Minuten, bevor sie wieder verbindet. In `/api/status` zeigt jeder Slot `keepConnected` und
 `nextAttemptSeconds`.
 
