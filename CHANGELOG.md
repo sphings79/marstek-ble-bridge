@@ -6,6 +6,10 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.6 — 2026-11-15
+**Beta.** Web interface only; the firmware is unchanged from v1.4.0-beta.3.
+- *Star on GitHub* in the web interface now links to this repository instead of the Control repository.
+
 ## v1.4.0-beta.5 — 2026-11-15
 **Beta.** Web interface only; the firmware is unchanged from v1.4.0-beta.3.
 - Going back from a beta to stable no longer ends in a dead end: with older firmware than the web
