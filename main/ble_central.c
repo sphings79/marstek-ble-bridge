@@ -176,7 +176,7 @@ void ble_central_log_dump(ble_log_line_cb_t cb, void *ctx)
             case BLE_EV_SUBSCRIBE:
                 snprintf(line, sizeof(line), "%9.3f s  slot %u  %-14s %s characteristic, status %u\n",
                          e->ms / 1000.0, (unsigned) e->slot, event_name(e->type),
-                         e->a ? "write" : "notify", (unsigned) e->b);
+                         e->a == 2 ? "write (skipped)" : (e->a ? "write" : "notify"), (unsigned) e->b);
                 break;
             case BLE_EV_GAP_OTHER:
                 snprintf(line, sizeof(line), "%9.3f s  slot %u  %-14s type %u\n",
@@ -357,6 +357,19 @@ static int on_tx_descriptors(uint16_t conn_handle, const struct ble_gatt_error *
     return 0;
 }
 
+/**
+ * Whether to leave the write characteristic's notifications alone.
+ *
+ * Browsers subscribe to the notify characteristic only, and the Venus D answers on it. The extra
+ * subscription on the write characteristic exists for storages that answer there instead, and on
+ * a Venus D the replies stopped about 25 s after it - which no other difference in the connection
+ * set-up explains. The name comes from the binding; a slot without one keeps the old behaviour.
+ */
+static bool skip_tx_subscription(const slot_t *s)
+{
+    return strncmp(s->name, "MST_VNSD", 8) == 0;
+}
+
 static int on_subscribe_done(uint16_t conn_handle, const struct ble_gatt_error *error,
                              struct ble_gatt_attr *attr, void *arg)
 {
@@ -376,7 +389,11 @@ static int on_subscribe_done(uint16_t conn_handle, const struct ble_gatt_error *
 
     // The write characteristic advertises notify as well. Subscribing to both costs one more
     // descriptor write and removes the guess about which one the device actually uses.
-    ble_gattc_disc_all_dscs(conn_handle, s->tx_handle, s->rx_handle, on_tx_descriptors, arg);
+    if (skip_tx_subscription(s)) {
+        ble_central_log(BLE_EV_SUBSCRIBE, slot, 2, 0);
+    } else {
+        ble_gattc_disc_all_dscs(conn_handle, s->tx_handle, s->rx_handle, on_tx_descriptors, arg);
+    }
 
     const ble_uuid16_t name_uuid = BLE_UUID16_INIT(GAP_DEVICE_NAME_UUID);
     if (ble_gattc_read_by_uuid(conn_handle, 1, 0xffff, &name_uuid.u, on_name_read, arg) != 0) {
@@ -668,7 +685,8 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg)
             ESP_LOGI(TAG, "[%u] Disconnected, reason 0x%x", slot, event->disconnect.reason);
             ble_central_log(BLE_EV_DISCONNECT, slot, (uint16_t) event->disconnect.reason, 0);
             reset_link(s);
-            s->name[0] = '\0';
+            // The name stays: it came from the binding, and the next connection needs it before
+            // the device has been asked (see skip_tx_subscription). A new name is read on connect.
 
             if (was_usable) {
                 set_state(slot, BLE_STATE_DISCONNECTED, NULL);

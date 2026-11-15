@@ -6,6 +6,15 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.13 — 2026-11-15
+**Beta.** Bridge and web interface only work together. A targeted test, not yet confirmed to fix anything.
+- **Venus D: the bridge no longer subscribes to the write characteristic's notifications.** The event
+  log showed that a Venus D stops answering about 25 s after connecting, also with a single storage,
+  and the only difference to a browser's Web Bluetooth connection (which subscribes to the notify
+  characteristic only) is that extra subscription. It is skipped for storages named `MST_VNSD...`;
+  all other models are handled as before. `/api/log` shows `write (skipped)`.
+- The bridge keeps the device name across a disconnect (it is needed before the device is asked).
+
 ## v1.4.0-beta.12 — 2026-11-15
 **Beta.** Diagnostic build; bridge and web interface only work together.
 - `/api/log` records more of what happens on a link: the connection parameters at link-up and
