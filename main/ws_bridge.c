@@ -75,19 +75,20 @@ static esp_timer_handle_t s_keep_timer;
 #define KEEP_FIRST_RETRY_S 5
 static const int s_backoff_s[] = { 5, 10, 30, 60 };
 
-// A link nobody talks on goes mute: writes are accepted and nothing comes back. For a slot that is
-// kept connected the bridge therefore asks the storage something small every so often when no
-// browser does, and cycles the link when the answers stay away.
-#define KEEPALIVE_S 30
-#define KEEPALIVE_REPLY_S 10
-#define KEEPALIVE_MISS_LIMIT 2
+// A link nobody talks on goes mute: writes are accepted, nothing comes back, and only a new
+// connection helps. The web app keeps its link alive by asking for the state every few seconds -
+// but it only polls the slot that is on screen, and not at all once the browser is gone. So the
+// bridge asks, whenever a slot has been quiet for a moment: always for a slot that is kept
+// connected, and for the others while a browser is watching. A kept slot that then stays silent is
+// cycled; the others are left alone, because nobody would bring them back up.
+#define KEEPALIVE_S 4
+#define KEEPALIVE_REPLY_S 3
+#define KEEPALIVE_MISS_LIMIT 3
 // A link that has said nothing for this long, while someone is supposed to be using it, is mute.
-// Longer than the keepalive interval, so a healthy kept link never counts as stale.
 #define STALE_LINK_S 45
 // The state request the web app polls with: magic, length, direction, command 0x03, XOR checksum.
 static const uint8_t s_keepalive_packet[] = { 0x73, 0x05, 0x23, 0x03, 0x56 };
 
-static int64_t s_next_poll_us[BLE_MAX_SLOTS];
 static int64_t s_poll_sent_us[BLE_MAX_SLOTS];
 static int s_misses[BLE_MAX_SLOTS];
 
@@ -317,52 +318,56 @@ int ws_bridge_keep_next_attempt_seconds(uint8_t slot)
 
 static int client_count(void);
 
-/** Ask a kept, connected slot something when nobody else does, and cycle it if it stays mute. */
+/** Keep a connected slot talking, and cycle a kept one that stays silent. */
 static void keepalive(uint8_t slot, int64_t now)
 {
-    // With a browser on the page the web app polls, which is traffic enough - and its answers are
-    // what the arrival check looks at.
-    if (client_count() > 0) {
+    // Nothing to ask before the storage can answer: the subscription is part of being ready.
+    if (!ble_central_is_ready(slot)) {
         s_poll_sent_us[slot] = 0;
-        s_misses[slot] = 0;
-        s_next_poll_us[slot] = now + (int64_t) KEEPALIVE_S * 1000000;
         return;
     }
 
+    // A request is out: wait for the answer, then count it.
     if (s_poll_sent_us[slot]) {
+        if (ble_central_last_notify_us(slot) >= s_poll_sent_us[slot]) {
+            s_poll_sent_us[slot] = 0;
+            s_misses[slot] = 0;
+            return;
+        }
         if (now - s_poll_sent_us[slot] < (int64_t) KEEPALIVE_REPLY_S * 1000000) {
             return;
         }
 
-        const bool answered = ble_central_last_notify_us(slot) >= s_poll_sent_us[slot];
         s_poll_sent_us[slot] = 0;
+        s_misses[slot]++;
+        ble_central_log(BLE_EV_KEEPALIVE_MISS, slot, (uint16_t) s_misses[slot], 0);
 
-        if (answered) {
-            s_misses[slot] = 0;
-            return;
-        }
-
-        if (++s_misses[slot] >= KEEPALIVE_MISS_LIMIT) {
+        if (s_keep[slot] && s_misses[slot] >= KEEPALIVE_MISS_LIMIT) {
             ESP_LOGW(TAG, "Slot %u went mute - cycling the link", (unsigned) slot);
             ble_central_log(BLE_EV_CYCLE, slot, 1, 0);
             s_misses[slot] = 0;
             ble_central_disconnect(slot);
-            return;
         }
-
-        ble_central_log(BLE_EV_KEEPALIVE_MISS, slot, (uint16_t) s_misses[slot], 0);
-
-        // One unanswered request can be a hiccup; look again soon rather than in half a minute.
-        s_next_poll_us[slot] = now + (int64_t) KEEPALIVE_REPLY_S * 1000000;
         return;
     }
 
-    if (now >= s_next_poll_us[slot]) {
-        if (ble_central_write(slot, s_keepalive_packet, sizeof(s_keepalive_packet), false) == ESP_OK) {
-            s_poll_sent_us[slot] = now;
-            ble_central_log(BLE_EV_KEEPALIVE, slot, 0, 0);
-        }
-        s_next_poll_us[slot] = now + (int64_t) KEEPALIVE_S * 1000000;
+    // Traffic of any kind - the browser's requests, a transfer in progress - is as good as a
+    // request of ours, and a firmware transfer must never have a stray command pushed into it.
+    const int64_t last_activity = ble_central_last_notify_us(slot) > ble_central_last_write_us(slot)
+                                      ? ble_central_last_notify_us(slot)
+                                      : ble_central_last_write_us(slot);
+    if (now - last_activity < (int64_t) KEEPALIVE_S * 1000000) {
+        s_misses[slot] = 0;
+        return;
+    }
+
+    // Only a kept slot is asked for when nobody is watching; the others are released shortly.
+    if (!s_keep[slot] && client_count() == 0) {
+        return;
+    }
+
+    if (ble_central_write_quiet(slot, s_keepalive_packet, sizeof(s_keepalive_packet), false) == ESP_OK) {
+        s_poll_sent_us[slot] = now;
     }
 }
 
@@ -380,11 +385,13 @@ static void keep_tick(void *arg)
     const int64_t now = esp_timer_get_time();
 
     for (uint8_t slot = 0; slot < BLE_MAX_SLOTS; slot++) {
+        if (ble_central_is_connected(slot)) {
+            keepalive(slot, now);
+        }
         if (!s_keep[slot] || !is_bound(slot)) {
             continue;
         }
         if (ble_central_is_connected(slot)) {
-            keepalive(slot, now);
             continue;
         }
         if (ble_central_is_busy(slot)) {
@@ -784,7 +791,6 @@ static void on_ble_state(uint8_t slot, ble_state_t state, const char *msg)
         s_attempts[slot] = 0;
         s_misses[slot] = 0;
         s_poll_sent_us[slot] = 0;
-        s_next_poll_us[slot] = esp_timer_get_time() + (int64_t) KEEPALIVE_S * 1000000;
     } else if (state == BLE_STATE_DISCONNECTED && s_keep[slot]) {
         // It was up and dropped: try again soon, with a fresh backoff.
         s_attempts[slot] = 0;

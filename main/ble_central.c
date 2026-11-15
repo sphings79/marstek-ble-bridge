@@ -56,6 +56,9 @@ typedef struct {
 
     /** Last notification, or the moment the link came up. Tells a talking link from a mute one. */
     int64_t last_notify_us;
+    int64_t last_write_us;
+    /** Subscription done and name read: from here on the storage answers requests. */
+    bool ready;
 
     ble_addr_t target;
     bool have_target;
@@ -83,7 +86,7 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg);
 
 /* ------------------------------------------------------------------------------------ event log */
 
-#define LOG_ENTRIES 160
+#define LOG_ENTRIES 320
 
 typedef struct {
     uint32_t ms;
@@ -132,12 +135,8 @@ static const char *event_name(uint8_t type)
 
 void ble_central_log_dump(ble_log_line_cb_t cb, void *ctx)
 {
-    // Copy under the lock, format outside it.
-    static log_entry_t copy[LOG_ENTRIES];
     uint32_t count;
-
     portENTER_CRITICAL(&s_log_lock);
-    memcpy(copy, s_log, sizeof(copy));
     count = s_log_count;
     portEXIT_CRITICAL(&s_log_lock);
 
@@ -145,7 +144,14 @@ void ble_central_log_dump(ble_log_line_cb_t cb, void *ctx)
     const uint32_t first = count - shown;
 
     for (uint32_t i = 0; i < shown; i++) {
-        const log_entry_t *e = &copy[(first + i) % LOG_ENTRIES];
+        // One entry at a time under the lock. The log may move on while it is being read, which is
+        // fine for a diagnostic listing and keeps this off the stack and out of RAM.
+        log_entry_t entry;
+        portENTER_CRITICAL(&s_log_lock);
+        entry = s_log[(first + i) % LOG_ENTRIES];
+        portEXIT_CRITICAL(&s_log_lock);
+
+        const log_entry_t *e = &entry;
         char line[96];
 
         switch (e->type) {
@@ -174,6 +180,7 @@ static void reset_link(slot_t *s)
     s->tx_handle = s->rx_handle = s->rx_cccd_handle = s->tx_cccd_handle = 0;
     s->subscribed = s->subscribed_tx = false;
     s->encrypted = false;
+    s->ready = false;
     s->mtu = 23;
 }
 
@@ -252,6 +259,7 @@ static int on_mtu_exchanged(uint16_t conn_handle, const struct ble_gatt_error *e
 static void announce_connected(uint8_t slot)
 {
     ESP_LOGI(TAG, "[%u] Connected to %s (%s)", slot, s_slots[slot].name, s_slots[slot].address);
+    s_slots[slot].ready = true;
     ble_central_log(BLE_EV_READY, slot, 0, 0);
     set_state(slot, BLE_STATE_CONNECTED, NULL);
 }
@@ -968,12 +976,13 @@ static int on_write_done(uint16_t conn_handle, const struct ble_gatt_error *erro
     return 0;
 }
 
-esp_err_t ble_central_write(uint8_t slot, const uint8_t *data, size_t len, bool with_response)
+static esp_err_t write_to_slot(uint8_t slot, const uint8_t *data, size_t len, bool with_response, bool quiet)
 {
     if (!ble_central_is_connected(slot)) {
         return ESP_ERR_INVALID_STATE;
     }
     slot_t *s = &s_slots[slot];
+    s->last_write_us = esp_timer_get_time();
 
     // Ask for an acknowledged write only if the characteristic actually offers one. Browsers pick
     // this way too - Chrome's writeValue() looks at the properties and silently uses the
@@ -988,8 +997,10 @@ esp_err_t ble_central_write(uint8_t slot, const uint8_t *data, size_t len, bool 
         ? ble_gattc_write_flat(s->conn_handle, s->tx_handle, data, len, on_write_done, arg_of(slot))
         : ble_gattc_write_no_rsp_flat(s->conn_handle, s->tx_handle, data, len);
 
-    ble_central_log(BLE_EV_WRITE, slot, (uint16_t) len,
-                    (uint16_t) ((len > 3 ? data[3] : 0) | (rc != 0 ? 0x8000 : 0)));
+    if (!quiet) {
+        ble_central_log(BLE_EV_WRITE, slot, (uint16_t) len,
+                        (uint16_t) ((len > 3 ? data[3] : 0) | (rc != 0 ? 0x8000 : 0)));
+    }
 
     if (rc != 0) {
         s->stats.writes_failed++;
@@ -999,6 +1010,26 @@ esp_err_t ble_central_write(uint8_t slot, const uint8_t *data, size_t len, bool 
 
     s->stats.writes_ok++;
     return ESP_OK;
+}
+
+esp_err_t ble_central_write(uint8_t slot, const uint8_t *data, size_t len, bool with_response)
+{
+    return write_to_slot(slot, data, len, with_response, false);
+}
+
+esp_err_t ble_central_write_quiet(uint8_t slot, const uint8_t *data, size_t len, bool with_response)
+{
+    return write_to_slot(slot, data, len, with_response, true);
+}
+
+int64_t ble_central_last_write_us(uint8_t slot)
+{
+    return valid_slot(slot) ? s_slots[slot].last_write_us : 0;
+}
+
+bool ble_central_is_ready(uint8_t slot)
+{
+    return valid_slot(slot) && s_slots[slot].ready && ble_central_is_connected(slot);
 }
 
 /** Remember the name a scan saw, so the app can identify the model without a round trip. */

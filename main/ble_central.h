@@ -126,6 +126,15 @@ void ble_central_stats(uint8_t slot, ble_stats_t *out);
  */
 esp_err_t ble_central_write(uint8_t slot, const uint8_t *data, size_t len, bool with_response);
 
+/** Same, but leaves the write out of the event log: for the bridge's own periodic requests. */
+esp_err_t ble_central_write_quiet(uint8_t slot, const uint8_t *data, size_t len, bool with_response);
+
+/** When anything was last written to the storage in `slot`, in esp_timer microseconds. */
+int64_t ble_central_last_write_us(uint8_t slot);
+
+/** The link is up and the notification subscription is in place, so the storage can answer. */
+bool ble_central_is_ready(uint8_t slot);
+
 /**
  * Remember the advertised name of the bound device, so the app can tell which model it is talking
  * to without a round trip. Not cosmetic: it selects the dashboard and guards firmware updates

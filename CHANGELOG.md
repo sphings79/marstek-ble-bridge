@@ -6,6 +6,17 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.9 — 2026-11-15
+**Beta.** Bridge and web interface only work together.
+- **Fix: connected slots no longer go silent.** The event log of beta.8 showed it: a storage answers
+  every request within a fraction of a second, but on a link nobody talks on it goes mute, and the
+  keepalive of beta.7 (every 30 s) came too late. The web app only polls the slot on screen, so the
+  other slot went mute even with the browser open. Now the bridge asks for the state whenever a slot
+  has been quiet for 4 s: always for a slot that is kept connected, and for the others while a browser
+  is watching. A kept slot that stays silent for three requests in a row is cycled and reconnected.
+  Traffic of any kind counts, so a firmware transfer never gets a stray command pushed into it.
+- The event log keeps 320 entries and leaves the bridge's own requests out, so it stays readable.
+
 ## v1.4.0-beta.8 — 2026-11-15
 **Beta.** Diagnostic build; bridge and web interface only work together.
 - New `/api/log` (needs a login): the newest 160 link events with timestamps - connects, drops, every
