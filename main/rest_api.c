@@ -1,6 +1,7 @@
 #include "rest_api.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "auth.h"
@@ -653,6 +654,63 @@ static esp_err_t connection_post(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ---------------------------------------------------------------- /api/experiment (session) */
+
+#define NVS_KEY_EXPERIMENT "experiment"
+
+static void load_experiment(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) {
+        return;
+    }
+    uint8_t bits = 0;
+    if (nvs_get_u8(nvs, NVS_KEY_EXPERIMENT, &bits) == ESP_OK) {
+        ble_central_set_experiment(bits);
+    }
+    nvs_close(nvs);
+}
+
+/**
+ * Debug switch for the Venus D problem: GET /api/experiment shows the value and what its bits mean,
+ * GET /api/experiment?set=N changes it. It applies to the next connection (disconnect and connect
+ * a slot to try it) and survives a restart.
+ */
+static esp_err_t experiment_get(httpd_req_t *req)
+{
+    if (!auth_guard(req)) {
+        return ESP_OK;
+    }
+
+    char query[32];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char value[8];
+        if (httpd_query_key_value(query, "set", value, sizeof(value)) == ESP_OK) {
+            const int bits = atoi(value);
+            if (bits < 0 || bits > 7) {
+                send_error(req, "400 Bad Request", "set must be 0 to 7");
+                return ESP_OK;
+            }
+            nvs_handle_t nvs;
+            if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs) == ESP_OK) {
+                nvs_set_u8(nvs, NVS_KEY_EXPERIMENT, (uint8_t) bits);
+                nvs_commit(nvs);
+                nvs_close(nvs);
+            }
+            ble_central_set_experiment((uint8_t) bits);
+        }
+    }
+
+    char body[320];
+    snprintf(body, sizeof(body),
+             "{\"experiment\":%u,\"bits\":{\"1\":\"random own address\",\"2\":\"ATT MTU 512\","
+             "\"4\":\"vendor app's first reads\"},\"note\":\"applies to the next connection; "
+             "/api/experiment?set=N changes it\"}",
+             (unsigned) ble_central_experiment());
+    send_json_status(req, "200 OK", body);
+    return ESP_OK;
+}
+
 /* -------------------------------------------------------------------------- /api/log (session) */
 
 static void log_line(const char *line, void *ctx)
@@ -780,6 +838,7 @@ static esp_err_t settings_post(httpd_req_t *req)
 esp_err_t rest_api_register_handlers(httpd_handle_t server)
 {
     load_token();
+    load_experiment();
 
     const httpd_uri_t routes[] = {
         { .uri = "/api/token",        .method = HTTP_GET,    .handler = token_get },
@@ -790,6 +849,7 @@ esp_err_t rest_api_register_handlers(httpd_handle_t server)
         { .uri = "/api/status",       .method = HTTP_GET,    .handler = status_get },
         { .uri = "/api/connection",   .method = HTTP_POST,   .handler = connection_post },
         { .uri = "/api/log",          .method = HTTP_GET,    .handler = log_get },
+        { .uri = "/api/experiment",   .method = HTTP_GET,    .handler = experiment_get },
         { .uri = "/api/settings",     .method = HTTP_GET,    .handler = settings_get },
         { .uri = "/api/settings",     .method = HTTP_POST,   .handler = settings_post },
     };

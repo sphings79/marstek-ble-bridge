@@ -170,3 +170,16 @@ void ble_central_log(ble_event_t type, uint8_t slot, uint16_t a, uint16_t b);
 /** Call `cb` with one formatted line per logged event, oldest first. */
 typedef void (*ble_log_line_cb_t)(const char *line, void *ctx);
 void ble_central_log_dump(ble_log_line_cb_t cb, void *ctx);
+
+/**
+ * Switches for finding out why a Venus D stops answering about 28 s after it connects, which the
+ * vendor app does not suffer from. Bits, applied to the NEXT connection:
+ *   1  connect with a random (static) own address, as the vendor app's phone does, instead of the
+ *      public one
+ *   2  ask for an ATT MTU of 512, as the Venus D itself does, instead of 256
+ *   4  after connecting, send the three read-only requests the vendor app sends in its first seconds
+ *      (0x11 modem version, 0x24 VID, 0x51 vid/xid)
+ * Zero is the normal behaviour.
+ */
+void ble_central_set_experiment(uint8_t bits);
+uint8_t ble_central_experiment(void);

@@ -84,6 +84,25 @@ static size_t s_scan_count = 0;
 
 static int on_gap_event_slot(struct ble_gap_event *event, void *arg);
 
+/* ----------------------------------------------------------------------------- experiments */
+
+#define EXP_RANDOM_ADDRESS 1
+#define EXP_MTU_512 2
+#define EXP_APP_READS 4
+
+static uint8_t s_experiment = 0;
+static bool s_random_address_ready = false;
+
+void ble_central_set_experiment(uint8_t bits)
+{
+    s_experiment = bits;
+}
+
+uint8_t ble_central_experiment(void)
+{
+    return s_experiment;
+}
+
 /* ------------------------------------------------------------------------------------ event log */
 
 #define LOG_ENTRIES 320
@@ -333,11 +352,57 @@ static int on_mtu_exchanged(uint16_t conn_handle, const struct ble_gatt_error *e
     return 0;
 }
 
+/**
+ * The vendor app's first requests after connecting, besides the state: modem version, VID and
+ * vid/xid, all reads. Frames as seen in a capture of the app.
+ */
+static const uint8_t s_app_reads[][8] = {
+    { 0x73, 0x08, 0x23, 0x11, 0x0a, 0x0b, 0x0c, 0x44 },
+    { 0x73, 0x07, 0x23, 0x24, 0x0a, 0x0b, 0x72, 0x00 },
+    { 0x73, 0x06, 0x23, 0x51, 0x0c, 0x0b, 0x00, 0x00 },
+};
+static const uint8_t s_app_reads_len[] = { 8, 7, 6 };
+
+static esp_timer_handle_t s_reads_timer[BLE_MAX_SLOTS];
+static uint8_t s_reads_next[BLE_MAX_SLOTS];
+
+static void send_app_read(void *arg)
+{
+    const uint8_t slot = slot_of(arg);
+    const uint8_t i = s_reads_next[slot];
+    if (i >= sizeof(s_app_reads_len) || !ble_central_is_connected(slot)) {
+        return;
+    }
+
+    ble_central_write(slot, s_app_reads[i], s_app_reads_len[i], false);
+    s_reads_next[slot] = i + 1;
+
+    if (i + 1 < sizeof(s_app_reads_len)) {
+        esp_timer_start_once(s_reads_timer[slot], 700 * 1000);
+    }
+}
+
+static void start_app_reads(uint8_t slot)
+{
+    if (!s_reads_timer[slot]) {
+        const esp_timer_create_args_t args = { .callback = &send_app_read, .arg = arg_of(slot), .name = "ble_reads" };
+        if (esp_timer_create(&args, &s_reads_timer[slot]) != ESP_OK) {
+            return;
+        }
+    }
+    s_reads_next[slot] = 0;
+    esp_timer_stop(s_reads_timer[slot]);
+    esp_timer_start_once(s_reads_timer[slot], 400 * 1000);
+}
+
 static void announce_connected(uint8_t slot)
 {
     ESP_LOGI(TAG, "[%u] Connected to %s (%s)", slot, s_slots[slot].name, s_slots[slot].address);
     s_slots[slot].ready = true;
     ble_central_log(BLE_EV_READY, slot, 0, 0);
+    if (s_experiment & EXP_APP_READS) {
+        start_app_reads(slot);
+    }
     set_state(slot, BLE_STATE_CONNECTED, NULL);
 }
 
@@ -633,15 +698,26 @@ static esp_err_t start_connect(uint8_t slot)
     ble_gap_disc_cancel();
 
     uint8_t own_addr_type;
-    if (ble_hs_id_infer_auto(0, &own_addr_type) != 0) {
+    if (s_experiment & EXP_RANDOM_ADDRESS) {
+        if (!s_random_address_ready) {
+            ble_addr_t addr;
+            if (ble_hs_id_gen_rnd(0, &addr) == 0 && ble_hs_id_set_rnd(addr.val) == 0) {
+                s_random_address_ready = true;
+            }
+        }
+        own_addr_type = s_random_address_ready ? BLE_OWN_ADDR_RANDOM : BLE_OWN_ADDR_PUBLIC;
+    } else if (ble_hs_id_infer_auto(0, &own_addr_type) != 0) {
         s->connect_pending = false;
         set_state(slot, BLE_STATE_ERROR, "Could not choose a Bluetooth address");
         return ESP_FAIL;
     }
 
+    // Takes effect when the peer's MTU request is answered, so it has to be set before the link is up.
+    ble_att_set_preferred_mtu((s_experiment & EXP_MTU_512) ? 512 : 256);
+
     s_connecting = slot;
     s->connect_pending = true;
-    ble_central_log(BLE_EV_CONNECT_START, slot, 0, 0);
+    ble_central_log(BLE_EV_CONNECT_START, slot, s_experiment, 0);
 
     // The parameters the vendor app asks for (read from a Bluetooth capture of it): 30-50 ms
     // interval, no latency, and a 5 s supervision timeout - NimBLE's default is 2.56 s.

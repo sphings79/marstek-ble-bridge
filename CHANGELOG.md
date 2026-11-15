@@ -6,6 +6,14 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.16 — 2026-11-16
+**Beta.** Diagnostic build; bridge and web interface only work together.
+- **`/api/experiment` (needs a login):** a debug switch for the Venus D that stops answering about 28 s
+  after connecting. `/api/experiment?set=N` applies to the next connection and survives a restart; `set=0`
+  is the normal behaviour. Bits: 1 = random own Bluetooth address (as the vendor app's phone uses),
+  2 = ATT MTU 512 (as the Venus D requests itself), 4 = the three read-only requests the vendor app
+  sends in its first seconds (0x11, 0x24, 0x51). `/api/log` shows the value on every `connect-start`.
+
 ## v1.4.0-beta.15 — 2026-11-16
 **Beta.** Bridge and web interface only work together. A test: it is not yet known whether it helps.
 - **Connects the way the vendor app does.** A Bluetooth capture of the vendor app shows a Venus D
