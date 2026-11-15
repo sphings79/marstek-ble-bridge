@@ -6,6 +6,15 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.14 — 2026-11-15
+**Beta.** Bridge and web interface only work together. A test for the storages that stop answering.
+- **One command at a time per storage.** The event log showed that a storage drops a command that
+  arrives while it is still busy with the previous one (two commands 5 ms apart: only the first was
+  answered). The web app already pauses between writes, but over WiFi two of them can reach the bridge
+  in the same instant. Ordinary commands now wait in a short queue per slot: the next one goes out
+  when the previous one has been answered (or after 2 s) plus 100 ms, as other integrations do.
+  Firmware transfers are not affected. REST commands use the same queue.
+
 ## v1.4.0-beta.13 — 2026-11-15
 **Beta.** Bridge and web interface only work together. A targeted test, not yet confirmed to fix anything.
 - **Venus D: the bridge no longer subscribes to the write characteristic's notifications.** The event

@@ -44,6 +44,8 @@ static uint16_t s_hold_seconds = HOLD_SECONDS_DEFAULT;
 // place, then took the BLE link down with it when it left.
 #define MAX_CLIENTS 4
 
+static void cmd_flush(uint8_t slot);
+
 static httpd_handle_t s_server = NULL;
 static int s_clients[MAX_CLIENTS] = { -1, -1, -1, -1 };
 static SemaphoreHandle_t s_send_lock;
@@ -778,6 +780,11 @@ static void on_ble_state(uint8_t slot, ble_state_t state, const char *msg)
 {
     send_status(slot, state, msg);
 
+    if (state == BLE_STATE_DISCONNECTED || state == BLE_STATE_ERROR || state == BLE_STATE_CONNECTED) {
+        // Nothing queued for the old link makes sense on a new one.
+        cmd_flush(slot);
+    }
+
     if (state == BLE_STATE_CONNECTED) {
         s_attempts[slot] = 0;
         s_misses[slot] = 0;
@@ -820,6 +827,135 @@ static void on_scan_finished(const ble_device_t *devices, size_t count)
     }
 
     send_json(json);
+}
+
+/* ------------------------------------------------------------------------- command queue */
+
+// A storage handles one request at a time and drops one that arrives while it is busy with the
+// previous - the event log shows the second of two commands 5 ms apart never being answered. The
+// web app paces its writes, but over WiFi two of them can reach the bridge in the same instant, so
+// the pacing that counts happens here: per slot, one ordinary command goes out, the next waits for
+// its answer (or two seconds) and a short pause. Firmware chunks are written without response and
+// bypass this; they have their own flow control.
+#define CMD_QUEUE_DEPTH 6
+#define CMD_MAX_LEN 160
+#define CMD_REPLY_TIMEOUT_US (2LL * 1000 * 1000)
+#define CMD_GAP_US (100LL * 1000)
+
+typedef struct {
+    uint8_t len;
+    uint8_t data[CMD_MAX_LEN];
+} queued_cmd_t;
+
+static queued_cmd_t s_cmdq[BLE_MAX_SLOTS][CMD_QUEUE_DEPTH];
+static uint8_t s_cmdq_head[BLE_MAX_SLOTS];
+static uint8_t s_cmdq_count[BLE_MAX_SLOTS];
+// When the command that is waiting for its answer went out, 0 when none is.
+static int64_t s_cmd_sent_us[BLE_MAX_SLOTS];
+static SemaphoreHandle_t s_cmdq_lock;
+static esp_timer_handle_t s_cmdq_timer;
+
+/** Whether the next command of this slot may go out now. Call with the lock held. */
+static bool cmd_gate_open(uint8_t slot, int64_t now)
+{
+    const int64_t sent = s_cmd_sent_us[slot];
+    if (sent == 0) {
+        // Nothing outstanding; still leave a pause after the last thing the storage said.
+        return now - ble_central_last_notify_us(slot) >= CMD_GAP_US;
+    }
+
+    const int64_t replied = ble_central_last_notify_us(slot);
+    if (replied >= sent) {
+        return now - replied >= CMD_GAP_US;
+    }
+    return now - sent >= CMD_REPLY_TIMEOUT_US;
+}
+
+static void cmd_arm_timer(void)
+{
+    if (s_cmdq_timer) {
+        esp_timer_stop(s_cmdq_timer);
+        esp_timer_start_once(s_cmdq_timer, 20 * 1000);
+    }
+}
+
+/** Send whatever is due; leave the rest for the timer. */
+static void cmd_pump(void *arg)
+{
+    (void) arg;
+
+    bool more = false;
+    xSemaphoreTake(s_cmdq_lock, portMAX_DELAY);
+
+    for (uint8_t slot = 0; slot < BLE_MAX_SLOTS; slot++) {
+        if (s_cmdq_count[slot] == 0) {
+            continue;
+        }
+
+        const int64_t now = esp_timer_get_time();
+        if (!cmd_gate_open(slot, now)) {
+            more = true;
+            continue;
+        }
+
+        queued_cmd_t *cmd = &s_cmdq[slot][s_cmdq_head[slot]];
+        s_cmdq_head[slot] = (uint8_t) ((s_cmdq_head[slot] + 1) % CMD_QUEUE_DEPTH);
+        s_cmdq_count[slot]--;
+
+        if (ble_central_write(slot, cmd->data, cmd->len, true) == ESP_OK) {
+            s_cmd_sent_us[slot] = esp_timer_get_time();
+        }
+
+        if (s_cmdq_count[slot] > 0) {
+            more = true;
+        }
+    }
+
+    xSemaphoreGive(s_cmdq_lock);
+
+    if (more) {
+        cmd_arm_timer();
+    }
+}
+
+/** Forget what is queued for a slot, for instance because its link is gone. */
+static void cmd_flush(uint8_t slot)
+{
+    xSemaphoreTake(s_cmdq_lock, portMAX_DELAY);
+    s_cmdq_count[slot] = 0;
+    s_cmdq_head[slot] = 0;
+    s_cmd_sent_us[slot] = 0;
+    xSemaphoreGive(s_cmdq_lock);
+}
+
+/**
+ * Queue an ordinary command for a slot and send it as soon as the storage is ready for it.
+ * ESP_ERR_INVALID_STATE when the slot has no link, ESP_ERR_NO_MEM when too many are waiting.
+ */
+static esp_err_t cmd_enqueue(uint8_t slot, const uint8_t *data, size_t len)
+{
+    if (!ble_central_is_connected(slot)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    // Longer than any command seen: send it as it is rather than refuse it.
+    if (len > CMD_MAX_LEN) {
+        return ble_central_write(slot, data, len, true);
+    }
+
+    xSemaphoreTake(s_cmdq_lock, portMAX_DELAY);
+    if (s_cmdq_count[slot] >= CMD_QUEUE_DEPTH) {
+        xSemaphoreGive(s_cmdq_lock);
+        ESP_LOGW(TAG, "Slot %u: command queue full, dropping a command", (unsigned) slot);
+        return ESP_ERR_NO_MEM;
+    }
+    queued_cmd_t *slot_entry = &s_cmdq[slot][(s_cmdq_head[slot] + s_cmdq_count[slot]) % CMD_QUEUE_DEPTH];
+    slot_entry->len = (uint8_t) len;
+    memcpy(slot_entry->data, data, len);
+    s_cmdq_count[slot]++;
+    xSemaphoreGive(s_cmdq_lock);
+
+    cmd_pump(NULL);
+    return ESP_OK;
 }
 
 /* ------------------------------------------------------------------------- REST entry point */
@@ -868,7 +1004,7 @@ esp_err_t ws_bridge_command(uint8_t slot, const uint8_t *data, size_t len, uint3
         return err;
     }
 
-    err = ble_central_write(slot, data, len, true);
+    err = cmd_enqueue(slot, data, len);
 
     if (client_count() == 0) {
         start_linger();
@@ -1086,9 +1222,14 @@ static esp_err_t ws_handler(httpd_req_t *req)
                 send_error(BLE_SLOT_NONE, "bad_message", "Unknown slot");
                 break;
             }
-            // The rest goes to the storage untouched.
-            if (ble_central_write(slot, buf + 2, frame.len - 2, buf[1] == WRITE_WITH_RESPONSE) != ESP_OK) {
-                send_error(slot, "write_failed", "Not connected to a storage");
+            // The rest goes to the storage untouched. Ordinary commands wait their turn; chunks
+            // written without response go straight out.
+            const esp_err_t err_write = buf[1] == WRITE_WITH_RESPONSE
+                                            ? cmd_enqueue(slot, buf + 2, frame.len - 2)
+                                            : ble_central_write(slot, buf + 2, frame.len - 2, false);
+            if (err_write != ESP_OK) {
+                send_error(slot, "write_failed", err_write == ESP_ERR_NO_MEM ? "Too many commands waiting"
+                                                                              : "Not connected to a storage");
             }
             break;
         }
@@ -1204,6 +1345,15 @@ esp_err_t ws_bridge_start(httpd_handle_t server)
     s_send_lock = xSemaphoreCreateMutex();
     if (!s_send_lock) {
         return ESP_ERR_NO_MEM;
+    }
+
+    s_cmdq_lock = xSemaphoreCreateMutex();
+    if (!s_cmdq_lock) {
+        return ESP_ERR_NO_MEM;
+    }
+    const esp_timer_create_args_t cmdq_args = { .callback = &cmd_pump, .name = "ws_cmdq" };
+    if (esp_timer_create(&cmdq_args, &s_cmdq_timer) != ESP_OK) {
+        return ESP_FAIL;
     }
 
     for (uint8_t slot = 0; slot < BLE_MAX_SLOTS; slot++) {
