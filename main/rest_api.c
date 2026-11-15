@@ -552,12 +552,13 @@ static esp_err_t status_get(httpd_req_t *req)
         char name[BLE_NAME_MAX + 1], address[BLE_ADDR_STR_LEN + 1];
 
         APPEND("%s{\"slot\":%d,\"bound\":%s,\"name\":\"%s\",\"address\":\"%s\","
-               "\"connected\":%s,\"rssi\":%d,\"mtu\":%u,"
+               "\"connected\":%s,\"rssi\":%d,\"mtu\":%u,\"lastReplySeconds\":%lld,"
                "\"keepConnected\":%s,\"nextAttemptSeconds\":",
                i ? "," : "", i, bound ? "true" : "false", json_safe(ws_bridge_slot_name((uint8_t) i), name, sizeof(name)),
                json_safe(ws_bridge_slot_address((uint8_t) i), address, sizeof(address)), connected ? "true" : "false",
                connected ? (int) ble_central_rssi((uint8_t) i) : 0,
                connected ? (unsigned) ble_central_mtu((uint8_t) i) : 0u,
+               connected ? (long long) ((now - ble_central_last_notify_us((uint8_t) i)) / 1000000) : -1LL,
                ws_bridge_keep((uint8_t) i) ? "true" : "false");
 
         const int next_attempt = ws_bridge_keep_next_attempt_seconds((uint8_t) i);

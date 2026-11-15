@@ -73,6 +73,9 @@ void ble_central_disconnect_all(void);
 
 bool ble_central_is_connected(uint8_t slot);
 
+/** When the storage in `slot` last sent anything (or, failing that, when the link came up), in esp_timer microseconds. */
+int64_t ble_central_last_notify_us(uint8_t slot);
+
 /** A connection attempt is running or waiting its turn, or the link is up but not usable yet. */
 bool ble_central_is_busy(uint8_t slot);
 

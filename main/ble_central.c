@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nimble/nimble_port.h"
@@ -52,6 +53,9 @@ typedef struct {
     bool encrypted;
     uint16_t last_enc_status;
     ble_stats_t stats;
+
+    /** Last notification, or the moment the link came up. Tells a talking link from a mute one. */
+    int64_t last_notify_us;
 
     ble_addr_t target;
     bool have_target;
@@ -500,6 +504,7 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg)
 
             reset_link(s);
             s->conn_handle = event->connect.conn_handle;
+            s->last_notify_us = esp_timer_get_time();
 
             ble_gattc_exchange_mtu(s->conn_handle, on_mtu_exchanged, arg);
 
@@ -574,6 +579,7 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg)
             if (len <= sizeof(buf) &&
                 ble_hs_mbuf_to_flat(event->notify_rx.om, buf, sizeof(buf), NULL) == 0 &&
                 s_on_notify) {
+                s->last_notify_us = esp_timer_get_time();
                 s->stats.notifications++;
                 s->stats.notify_bytes += len;
                 ESP_LOGD(TAG, "[%u] Notification, %u bytes", slot, (unsigned) len);
@@ -778,6 +784,11 @@ bool ble_central_is_connected(uint8_t slot)
         return false;
     }
     return s_slots[slot].conn_handle != BLE_HS_CONN_HANDLE_NONE && s_slots[slot].tx_handle != 0;
+}
+
+int64_t ble_central_last_notify_us(uint8_t slot)
+{
+    return valid_slot(slot) ? s_slots[slot].last_notify_us : 0;
 }
 
 bool ble_central_is_busy(uint8_t slot)

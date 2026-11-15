@@ -173,6 +173,14 @@ esp_err_t web_server_start(void)
     config.close_fn = on_session_close;
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.lru_purge_enable = true;
+    // A phone that is closed or loses WiFi leaves its socket half open: the bridge keeps counting
+    // that browser as present, so nothing ever notices that nobody is watching any more. TCP
+    // keepalive probes find the dead ones within about half a minute, and the session-close
+    // callback then lets the relay forget them.
+    config.keep_alive_enable = true;
+    config.keep_alive_idle = 10;
+    config.keep_alive_interval = 5;
+    config.keep_alive_count = 3;
     config.stack_size = 8192;
     // Default is 8, and the api routes alone are well past that now.
     config.max_uri_handlers = 32;

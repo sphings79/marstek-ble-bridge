@@ -6,6 +6,19 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.7 — 2026-11-15
+**Beta.** Bridge and web interface only work together.
+- **Fix: a kept-connected slot no longer ends up connected but silent.** A link nobody talks on goes
+  mute - writes are accepted, nothing comes back - so without a browser the bridge now asks a kept slot
+  for its state every 30 s and cycles the link (and reconnects) when two answers in a row stay away.
+- **Opening the page no longer drops healthy links.** A link that has answered recently is kept; only
+  a link that has been quiet for 45 s is refreshed. This also covers a phone that was closed: its
+  half-dead connection used to count as a watching browser, so the stale link was never refreshed.
+- The bridge now detects such dead browser connections itself (TCP keepalive, about 30 s) and stops
+  counting them.
+- `/api/status` shows `lastReplySeconds` per slot: seconds since the storage last sent anything.
+- The slots are named *Device 1-3* instead of *Storage 1-3* in the interface.
+
 ## v1.4.0-beta.6 — 2026-11-15
 **Beta.** Web interface only; the firmware is unchanged from v1.4.0-beta.3.
 - *Star on GitHub* in the web interface now links to this repository instead of the Control repository.
