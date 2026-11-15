@@ -6,11 +6,15 @@
 #include "auth.h"
 #include "ble_central.h"
 #include "cJSON.h"
+#include "esp_app_desc.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "mbedtls/sha256.h"
 #include "nvs.h"
+#include "wifi.h"
 #include "ws_bridge.h"
 
 static const char *TAG = "rest";
@@ -54,6 +58,35 @@ typedef struct {
 
 // What was last sent, not what the storage does: it does not report this setting back.
 static last_peak_t s_last_peak[BLE_MAX_SLOTS];
+
+// The outcome of the last command that reached the REST interface and passed validation, so a
+// failing automation can be looked at from the outside instead of guessed at.
+static struct {
+    bool known;
+    int slot;
+    const char *what;
+    esp_err_t result;
+    int64_t at_us;
+} s_last_command;
+
+static void record_command(int slot, const char *what, esp_err_t result)
+{
+    s_last_command.known = true;
+    s_last_command.slot = slot;
+    s_last_command.what = what;
+    s_last_command.result = result;
+    s_last_command.at_us = esp_timer_get_time();
+}
+
+static const char *result_name(esp_err_t err)
+{
+    switch (err) {
+        case ESP_OK:               return "ok";
+        case ESP_ERR_NOT_FOUND:    return "no storage in slot";
+        case ESP_ERR_TIMEOUT:      return "storage did not connect";
+        default:                   return "send failed";
+    }
+}
 
 /* --------------------------------------------------------------------------------- helpers */
 
@@ -289,6 +322,72 @@ static size_t build_packet(uint8_t cmd, const uint8_t *payload, size_t payload_l
     return total;
 }
 
+/**
+ * Which storage a request means: by address, by slot, or - when only one is bound - just that one.
+ * Sends the refusal itself and returns false when it cannot tell.
+ */
+static bool resolve_slot(httpd_req_t *req, const cJSON *json, int *out)
+{
+    const cJSON *slot_item = cJSON_GetObjectItemCaseSensitive(json, "slot");
+    const cJSON *address = cJSON_GetObjectItemCaseSensitive(json, "address");
+
+    int slot = -1;
+    if (cJSON_IsString(address)) {
+        slot = ws_bridge_slot_for_address(address->valuestring);
+        if (slot < 0) {
+            send_error(req, "404 Not Found", "No slot holds that address");
+            return false;
+        }
+    }
+    if (cJSON_IsNumber(slot_item)) {
+        const int wanted = (int) slot_item->valuedouble;
+        if (wanted < 0 || wanted >= BLE_MAX_SLOTS) {
+            send_error(req, "400 Bad Request", "\\\"slot\\\" is out of range");
+            return false;
+        }
+        if (slot >= 0 && slot != wanted) {
+            send_error(req, "409 Conflict", "\\\"slot\\\" and \\\"address\\\" name different storages");
+            return false;
+        }
+        slot = wanted;
+    }
+    if (slot < 0) {
+        int only = -1, bound = 0;
+        for (int i = 0; i < BLE_MAX_SLOTS; i++) {
+            if (ws_bridge_slot_is_bound((uint8_t) i)) {
+                only = i;
+                bound++;
+            }
+        }
+        if (bound != 1) {
+            send_error(req, "400 Bad Request",
+                       bound == 0 ? "No storage is bound"
+                                  : "Several storages are bound - give \\\"slot\\\" or \\\"address\\\"");
+            return false;
+        }
+        slot = only;
+    }
+
+    *out = slot;
+    return true;
+}
+
+/** Map the outcome of reaching a storage onto an HTTP answer. Returns true when it was a success. */
+static bool answer_reach_error(httpd_req_t *req, esp_err_t err)
+{
+    if (err == ESP_OK) {
+        return true;
+    }
+    if (err == ESP_ERR_NOT_FOUND) {
+        send_error(req, "404 Not Found", "No storage in that slot");
+    } else if (err == ESP_ERR_TIMEOUT) {
+        send_error(req, "504 Gateway Timeout", "The storage did not connect in time");
+    } else {
+        send_error(req, "502 Bad Gateway", "The command could not be sent to the storage");
+    }
+    return false;
+}
+
 static esp_err_t peak_shaving_post(httpd_req_t *req)
 {
     if (!token_guard(req)) {
@@ -309,8 +408,6 @@ static esp_err_t peak_shaving_post(httpd_req_t *req)
 
     const cJSON *enabled = cJSON_GetObjectItemCaseSensitive(json, "enabled");
     const cJSON *power = cJSON_GetObjectItemCaseSensitive(json, "power");
-    const cJSON *slot_item = cJSON_GetObjectItemCaseSensitive(json, "slot");
-    const cJSON *address = cJSON_GetObjectItemCaseSensitive(json, "address");
 
     if (!cJSON_IsBool(enabled)) {
         cJSON_Delete(json);
@@ -334,45 +431,10 @@ static esp_err_t peak_shaving_post(httpd_req_t *req)
         return ESP_OK;
     }
 
-    // Which storage: by address, by slot, or - when only one is bound - just that one.
     int slot = -1;
-    if (cJSON_IsString(address)) {
-        slot = ws_bridge_slot_for_address(address->valuestring);
-        if (slot < 0) {
-            cJSON_Delete(json);
-            send_error(req, "404 Not Found", "No slot holds that address");
-            return ESP_OK;
-        }
-    }
-    if (cJSON_IsNumber(slot_item)) {
-        const int wanted = (int) slot_item->valuedouble;
-        if (wanted < 0 || wanted >= BLE_MAX_SLOTS) {
-            cJSON_Delete(json);
-            send_error(req, "400 Bad Request", "\\\"slot\\\" is out of range");
-            return ESP_OK;
-        }
-        if (slot >= 0 && slot != wanted) {
-            cJSON_Delete(json);
-            send_error(req, "409 Conflict", "\\\"slot\\\" and \\\"address\\\" name different storages");
-            return ESP_OK;
-        }
-        slot = wanted;
-    }
-    if (slot < 0) {
-        int only = -1, bound = 0;
-        for (int i = 0; i < BLE_MAX_SLOTS; i++) {
-            if (ws_bridge_slot_is_bound((uint8_t) i)) {
-                only = i;
-                bound++;
-            }
-        }
-        if (bound != 1) {
-            cJSON_Delete(json);
-            send_error(req, "400 Bad Request",
-                       bound == 0 ? "No storage is bound" : "Several storages are bound - give \\\"slot\\\" or \\\"address\\\"");
-            return ESP_OK;
-        }
-        slot = only;
+    if (!resolve_slot(req, json, &slot)) {
+        cJSON_Delete(json);
+        return ESP_OK;
     }
 
     const bool turn_on = cJSON_IsTrue(enabled);
@@ -388,16 +450,8 @@ static esp_err_t peak_shaving_post(httpd_req_t *req)
     const size_t packet_len = build_packet(CMD_PEAK_SHAVING, payload, sizeof(payload), packet);
 
     const esp_err_t err = ws_bridge_command((uint8_t) slot, packet, packet_len, CONNECT_TIMEOUT_MS);
-    if (err == ESP_ERR_NOT_FOUND) {
-        send_error(req, "404 Not Found", "No storage in that slot");
-        return ESP_OK;
-    }
-    if (err == ESP_ERR_TIMEOUT) {
-        send_error(req, "504 Gateway Timeout", "The storage did not connect in time");
-        return ESP_OK;
-    }
-    if (err != ESP_OK) {
-        send_error(req, "502 Bad Gateway", "The command could not be sent to the storage");
+    record_command(slot, "peak-shaving", err);
+    if (!answer_reach_error(req, err)) {
         return ESP_OK;
     }
 
@@ -446,6 +500,193 @@ static esp_err_t peak_shaving_get(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* --------------------------------------------------------- /api/status, /api/connection (token) */
+
+/** Copy a string for use inside a JSON string: anything that would break out of it becomes '_'. */
+static const char *json_safe(const char *in, char *out, size_t len)
+{
+    size_t i = 0;
+    for (; in[i] && i + 1 < len; i++) {
+        const unsigned char c = (unsigned char) in[i];
+        out[i] = (c < 0x20 || c == '"' || c == '\\' || c > 0x7e) ? '_' : (char) c;
+    }
+    out[i] = '\0';
+    return out;
+}
+
+/**
+ * Everything worth polling from outside in one answer: what the bridge is, how it is doing, what
+ * each slot holds and what the last REST command did. Meant for a Home Assistant sensor, and for
+ * finding out why an automation did nothing.
+ */
+static esp_err_t status_get(httpd_req_t *req)
+{
+    if (!token_guard(req)) {
+        return ESP_OK;
+    }
+
+    static char body[1536];
+    size_t used = 0;
+#define APPEND(...) do { \
+        if (used < sizeof(body)) { \
+            int n_ = snprintf(body + used, sizeof(body) - used, __VA_ARGS__); \
+            if (n_ > 0) used += (size_t) n_; \
+        } \
+    } while (0)
+
+    const int64_t now = esp_timer_get_time();
+    const esp_app_desc_t *app = esp_app_get_description();
+
+    APPEND("{\"version\":\"%s\",\"protocol\":%d,\"uptimeSeconds\":%lld,\"wifiRssi\":%d,"
+           "\"clients\":%d,\"holdSeconds\":%u,"
+           "\"heap\":{\"free\":%u,\"minFree\":%u,\"largestBlock\":%u},\"slots\":[",
+           app->version, WS_BRIDGE_PROTOCOL_VERSION, (long long) (now / 1000000), (int) wifi_rssi(),
+           ws_bridge_client_count(), (unsigned) ws_bridge_hold_seconds(),
+           (unsigned) esp_get_free_heap_size(), (unsigned) esp_get_minimum_free_heap_size(),
+           (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
+    for (int i = 0; i < BLE_MAX_SLOTS; i++) {
+        const bool bound = ws_bridge_slot_is_bound((uint8_t) i);
+        const bool connected = ble_central_is_connected((uint8_t) i);
+        const last_peak_t *p = &s_last_peak[i];
+        char name[BLE_NAME_MAX + 1], address[BLE_ADDR_STR_LEN + 1];
+
+        APPEND("%s{\"slot\":%d,\"bound\":%s,\"name\":\"%s\",\"address\":\"%s\","
+               "\"connected\":%s,\"rssi\":%d,\"mtu\":%u,\"lastSent\":",
+               i ? "," : "", i, bound ? "true" : "false", json_safe(ws_bridge_slot_name((uint8_t) i), name, sizeof(name)),
+               json_safe(ws_bridge_slot_address((uint8_t) i), address, sizeof(address)), connected ? "true" : "false",
+               connected ? (int) ble_central_rssi((uint8_t) i) : 0,
+               connected ? (unsigned) ble_central_mtu((uint8_t) i) : 0u);
+
+        if (p->known) {
+            APPEND("{\"peakShaving\":%s,\"power\":%d,\"ageSeconds\":%lld}",
+                   p->enabled ? "true" : "false", p->power, (long long) ((now - p->sent_at_us) / 1000000));
+        } else {
+            APPEND("null");
+        }
+        APPEND("}");
+    }
+
+    APPEND("],\"lastCommand\":");
+    if (s_last_command.known) {
+        APPEND("{\"what\":\"%s\",\"slot\":%d,\"ok\":%s,\"result\":\"%s\",\"ageSeconds\":%lld}",
+               s_last_command.what, s_last_command.slot,
+               s_last_command.result == ESP_OK ? "true" : "false", result_name(s_last_command.result),
+               (long long) ((now - s_last_command.at_us) / 1000000));
+    } else {
+        APPEND("null");
+    }
+    APPEND("}");
+#undef APPEND
+
+    send_json_status(req, "200 OK", body);
+    return ESP_OK;
+}
+
+/**
+ * Connect or disconnect a storage on request: a way to test that the bridge reaches it, and how
+ * long it holds it, without sending anything the storage would act on.
+ */
+static esp_err_t connection_post(httpd_req_t *req)
+{
+    if (!token_guard(req)) {
+        return ESP_OK;
+    }
+
+    char body[160];
+    if (!read_body(req, body, sizeof(body))) {
+        send_error(req, "400 Bad Request", "A small JSON body is required");
+        return ESP_OK;
+    }
+
+    cJSON *json = cJSON_Parse(body);
+    if (!json) {
+        send_error(req, "400 Bad Request", "Not valid JSON");
+        return ESP_OK;
+    }
+
+    const cJSON *action = cJSON_GetObjectItemCaseSensitive(json, "action");
+    const bool connect = cJSON_IsString(action) && strcmp(action->valuestring, "connect") == 0;
+    const bool disconnect = cJSON_IsString(action) && strcmp(action->valuestring, "disconnect") == 0;
+    if (!connect && !disconnect) {
+        cJSON_Delete(json);
+        send_error(req, "400 Bad Request", "\\\"action\\\" must be connect or disconnect");
+        return ESP_OK;
+    }
+
+    int slot = -1;
+    if (!resolve_slot(req, json, &slot)) {
+        cJSON_Delete(json);
+        return ESP_OK;
+    }
+    cJSON_Delete(json);
+
+    if (disconnect) {
+        ble_central_disconnect((uint8_t) slot);
+        record_command(slot, "disconnect", ESP_OK);
+    } else {
+        const esp_err_t err = ws_bridge_ensure_connected((uint8_t) slot, CONNECT_TIMEOUT_MS);
+        record_command(slot, "connect", err);
+        if (!answer_reach_error(req, err)) {
+            return ESP_OK;
+        }
+    }
+
+    char reply[96];
+    snprintf(reply, sizeof(reply), "{\"ok\":true,\"slot\":%d,\"action\":\"%s\"}", slot,
+             connect ? "connect" : "disconnect");
+    send_json_status(req, "200 OK", reply);
+    return ESP_OK;
+}
+
+/* ------------------------------------------------------------------- /api/settings (session) */
+
+static esp_err_t settings_get(httpd_req_t *req)
+{
+    if (!auth_guard(req)) {
+        return ESP_OK;
+    }
+
+    char body[48];
+    snprintf(body, sizeof(body), "{\"holdSeconds\":%u}", (unsigned) ws_bridge_hold_seconds());
+    send_json_status(req, "200 OK", body);
+    return ESP_OK;
+}
+
+static esp_err_t settings_post(httpd_req_t *req)
+{
+    if (!auth_guard(req)) {
+        return ESP_OK;
+    }
+
+    char body[96];
+    if (!read_body(req, body, sizeof(body))) {
+        send_error(req, "400 Bad Request", "A small JSON body is required");
+        return ESP_OK;
+    }
+
+    cJSON *json = cJSON_Parse(body);
+    const cJSON *hold = json ? cJSON_GetObjectItemCaseSensitive(json, "holdSeconds") : NULL;
+    const bool valid = cJSON_IsNumber(hold) && hold->valuedouble >= 5 && hold->valuedouble <= 3600 &&
+                       hold->valuedouble == (double) (int) hold->valuedouble;
+    const int seconds = valid ? (int) hold->valuedouble : 0;
+    cJSON_Delete(json);
+
+    if (!valid) {
+        send_error(req, "400 Bad Request", "\\\"holdSeconds\\\" must be a whole number from 5 to 3600");
+        return ESP_OK;
+    }
+    if (ws_bridge_set_hold_seconds((uint16_t) seconds) != ESP_OK) {
+        send_error(req, "500 Internal Server Error", "Could not store the setting");
+        return ESP_OK;
+    }
+
+    char reply[48];
+    snprintf(reply, sizeof(reply), "{\"holdSeconds\":%d}", seconds);
+    send_json_status(req, "200 OK", reply);
+    return ESP_OK;
+}
+
 /* ------------------------------------------------------------------------------ registration */
 
 esp_err_t rest_api_register_handlers(httpd_handle_t server)
@@ -458,6 +699,10 @@ esp_err_t rest_api_register_handlers(httpd_handle_t server)
         { .uri = "/api/token",        .method = HTTP_DELETE, .handler = token_delete },
         { .uri = "/api/peak-shaving", .method = HTTP_POST,   .handler = peak_shaving_post },
         { .uri = "/api/peak-shaving", .method = HTTP_GET,    .handler = peak_shaving_get },
+        { .uri = "/api/status",       .method = HTTP_GET,    .handler = status_get },
+        { .uri = "/api/connection",   .method = HTTP_POST,   .handler = connection_post },
+        { .uri = "/api/settings",     .method = HTTP_GET,    .handler = settings_get },
+        { .uri = "/api/settings",     .method = HTTP_POST,   .handler = settings_post },
     };
 
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {

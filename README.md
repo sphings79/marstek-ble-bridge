@@ -176,6 +176,28 @@ address, `504` the storage did not connect, `502` the command could not be sent.
 Peak shaving needs control firmware 150 or newer on the storage. The interface speaks plain HTTP, so
 use the token on a network you trust.
 
+**Testing from Home Assistant.** `GET /api/status` (same token) returns version, uptime, WiFi signal,
+heap, the hold time, each slot (name, address, connected, signal, last peak-shaving values sent) and
+the outcome of the last REST command. `POST /api/connection` with `{"slot":0,"action":"connect"}`
+(or `"disconnect"`) opens or releases a storage without sending anything to it, which is the quickest
+way to check that the bridge reaches it.
+
+```yaml
+sensor:
+  - platform: rest
+    name: Marstek bridge
+    resource: "http://marstek-bridge.local/api/status"
+    headers:
+      Authorization: "Bearer <token>"
+    scan_interval: 60
+    value_template: "{{ value_json.version }}"
+    json_attributes: [slots, heap, uptimeSeconds, wifiRssi, holdSeconds, lastCommand]
+```
+
+**Hold time.** After the last browser leaves or the last command is sent, the bridge keeps the
+storage connected for a while (default 15 s, 5-3600 s, set in the interface under *Connection*) and
+then lets go, so the vendor app can connect again. A page reload within that time keeps the link.
+
 ## What leaves your network
 
 Nothing. The bridge talks to your storage and to your browser. It reaches the internet for exactly

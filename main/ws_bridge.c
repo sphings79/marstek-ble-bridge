@@ -17,10 +17,17 @@
 
 static const char *TAG = "ws";
 
-// How long the storage links are kept after the last browser goes away. A page reload is a client
-// leaving and coming back within a second, and tearing the Bluetooth links down for that is what
-// made every reload land on a dashboard with no data behind it.
-#define LINGER_AFTER_LAST_CLIENT_MS 15000
+// How long the storage links are kept after the last browser goes away or the last REST command. A
+// page reload is a client leaving and coming back within a second, and tearing the Bluetooth links
+// down for that is what made every reload land on a dashboard with no data behind it. Adjustable,
+// because the other side of the trade is the vendor app, which cannot connect while we hold the
+// storage.
+#define HOLD_SECONDS_DEFAULT 15
+#define HOLD_SECONDS_MIN 5
+#define HOLD_SECONDS_MAX 3600
+#define NVS_KEY_HOLD "hold_s"
+
+static uint16_t s_hold_seconds = HOLD_SECONDS_DEFAULT;
 
 #define NVS_NAMESPACE "bridge"
 
@@ -109,6 +116,49 @@ static void load_bindings(void)
     }
 
     nvs_close(nvs);
+}
+
+static void load_hold(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) {
+        return;
+    }
+
+    uint16_t value;
+    if (nvs_get_u16(nvs, NVS_KEY_HOLD, &value) == ESP_OK && value >= HOLD_SECONDS_MIN &&
+        value <= HOLD_SECONDS_MAX) {
+        s_hold_seconds = value;
+    }
+    nvs_close(nvs);
+}
+
+uint16_t ws_bridge_hold_seconds(void)
+{
+    return s_hold_seconds;
+}
+
+esp_err_t ws_bridge_set_hold_seconds(uint16_t seconds)
+{
+    if (seconds < HOLD_SECONDS_MIN || seconds > HOLD_SECONDS_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_u16(nvs, NVS_KEY_HOLD, seconds);
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+
+    if (err == ESP_OK) {
+        s_hold_seconds = seconds;
+    }
+    return err;
 }
 
 static void store_binding(uint8_t slot, const char *address, const char *name)
@@ -308,9 +358,9 @@ static void start_linger(void)
 
     s_link_abandoned = true;
     esp_timer_stop(s_linger_timer);
-    esp_timer_start_once(s_linger_timer, (uint64_t) LINGER_AFTER_LAST_CLIENT_MS * 1000);
-    ESP_LOGI(TAG, "Nobody watching - holding the storages for %d s in case a browser comes back",
-             LINGER_AFTER_LAST_CLIENT_MS / 1000);
+    esp_timer_start_once(s_linger_timer, (uint64_t) s_hold_seconds * 1000 * 1000);
+    ESP_LOGI(TAG, "Nobody watching - holding the storages for %u s in case a browser comes back",
+             (unsigned) s_hold_seconds);
 }
 
 static int client_count(void)
@@ -543,7 +593,7 @@ static void on_scan_finished(const ble_device_t *devices, size_t count)
 
 /* ------------------------------------------------------------------------- REST entry point */
 
-esp_err_t ws_bridge_command(uint8_t slot, const uint8_t *data, size_t len, uint32_t connect_timeout_ms)
+esp_err_t ws_bridge_ensure_connected(uint8_t slot, uint32_t connect_timeout_ms)
 {
     if (!is_bound(slot)) {
         return ESP_ERR_NOT_FOUND;
@@ -552,8 +602,8 @@ esp_err_t ws_bridge_command(uint8_t slot, const uint8_t *data, size_t len, uint3
     if (!ble_central_is_connected(slot)) {
         // Nobody holds this storage right now, which is the normal case for a home automation
         // that sends a command every few hours. Connect for the command and let the usual
-        // linger release it afterwards - the storage takes one connection at a time per phone
-        // app, so holding it forever would lock the vendor app out.
+        // hold time release it afterwards - the storage takes one connection at a time, so
+        // holding it forever would lock the vendor app out.
         xSemaphoreTake(s_connect_wait[slot], 0);
         s_waiting[slot] = true;
 
@@ -571,15 +621,48 @@ esp_err_t ws_bridge_command(uint8_t slot, const uint8_t *data, size_t len, uint3
         }
     }
 
-    const esp_err_t err = ble_central_write(slot, data, len, true);
-
     // With a browser on the page the links stay as they are. Without one, restart the countdown
-    // so the storage is released a little after the last command and not in the middle of it.
+    // so the storage is released the hold time after the last use and not in the middle of it.
+    if (client_count() == 0) {
+        start_linger();
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t ws_bridge_command(uint8_t slot, const uint8_t *data, size_t len, uint32_t connect_timeout_ms)
+{
+    esp_err_t err = ws_bridge_ensure_connected(slot, connect_timeout_ms);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = ble_central_write(slot, data, len, true);
+
     if (client_count() == 0) {
         start_linger();
     }
 
     return err;
+}
+
+int ws_bridge_client_count(void)
+{
+    return client_count();
+}
+
+const char *ws_bridge_slot_name(uint8_t slot)
+{
+    if (!is_bound(slot)) {
+        return "";
+    }
+    const char *live = ble_central_device_name(slot);
+    return live[0] ? live : s_bound[slot].name;
+}
+
+const char *ws_bridge_slot_address(uint8_t slot)
+{
+    return is_bound(slot) ? s_bound[slot].addr : "";
 }
 
 /* ------------------------------------------------------------------------- WebSocket -> BLE */
@@ -900,6 +983,7 @@ esp_err_t ws_bridge_start(httpd_handle_t server)
     }
 
     load_bindings();
+    load_hold();
 
     esp_err_t err = ble_central_init(on_ble_notify, on_ble_state);
     if (err != ESP_OK) {

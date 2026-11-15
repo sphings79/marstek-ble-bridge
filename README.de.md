@@ -180,6 +180,29 @@ und lässt kurz danach wieder los. Bei einem Speicher darf `slot` entfallen. Ant
 Peak Shaving braucht auf dem Speicher Control-Firmware 150 oder neuer. Die Schnittstelle spricht
 unverschlüsseltes HTTP, den Token also nur in einem vertrauenswürdigen Netz verwenden.
 
+**Testen aus Home Assistant.** `GET /api/status` (gleicher Token) liefert Version, Laufzeit, WLAN-Signal,
+Heap, die Haltezeit, jeden Slot (Name, Adresse, verbunden, Signal, zuletzt gesendete Peak-Shaving-Werte)
+und das Ergebnis des letzten REST-Befehls. `POST /api/connection` mit `{"slot":0,"action":"connect"}`
+(oder `"disconnect"`) öffnet oder löst einen Speicher, ohne ihm etwas zu senden. So prüft man am
+schnellsten, ob die Bridge ihn erreicht.
+
+```yaml
+sensor:
+  - platform: rest
+    name: Marstek Bridge
+    resource: "http://marstek-bridge.local/api/status"
+    headers:
+      Authorization: "Bearer <token>"
+    scan_interval: 60
+    value_template: "{{ value_json.version }}"
+    json_attributes: [slots, heap, uptimeSeconds, wifiRssi, holdSeconds, lastCommand]
+```
+
+**Haltezeit.** Nachdem der letzte Browser gegangen oder der letzte Befehl gesendet ist, hält die Bridge den
+Speicher noch eine Weile verbunden (Standard 15 s, 5-3600 s, einstellbar in der Oberfläche unter
+*Verbindung*) und lässt dann los, damit die Hersteller-App wieder verbinden kann. Ein Neuladen der Seite
+innerhalb dieser Zeit behält die Verbindung.
+
 ## Was das Netzwerk verlässt
 
 Nichts. Die Bridge redet mit deinem Speicher und mit deinem Browser. Ins Internet geht sie für

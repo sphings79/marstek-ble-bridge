@@ -6,6 +6,15 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.2 — 2026-11-15
+**Beta.** Same pairing rule as beta.1: bridge and web interface only work together.
+- **Hold time is adjustable** (5-3600 s, default 15 s): how long the storages stay connected after the
+  last browser or the last REST command. Set it in the interface under *Connection*.
+- **Testing from Home Assistant:** `GET /api/status` (version, uptime, WiFi, heap, slots, last REST
+  command) and `POST /api/connection` to connect or release a storage without sending a command.
+  README has a ready-made `rest` sensor.
+- Slots, binding and removing a device are locked while a firmware update is running.
+
 ## v1.4.0-beta.1 — 2026-11-15
 **Beta.** Needs the matching web interface; older web apps do not work with this firmware and the
 other way round. Not yet tested against real storages in several slots.

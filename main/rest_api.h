@@ -17,6 +17,10 @@
  *   DELETE /api/token          session  switches the token and with it the REST commands off
  *   POST   /api/peak-shaving   token    {"slot":0,"enabled":true,"power":600}
  *   GET    /api/peak-shaving   token    last values sent per slot
+ *   GET    /api/status         token    version, uptime, heap, slots, last command - for monitoring
+ *   POST   /api/connection     token    {"slot":0,"action":"connect"|"disconnect"}
+ *   GET    /api/settings       session  {"holdSeconds":15}
+ *   POST   /api/settings       session  {"holdSeconds":n}, 5 to 3600
  *
  * Plain HTTP, like the rest of the bridge: use this on a network you trust.
  */

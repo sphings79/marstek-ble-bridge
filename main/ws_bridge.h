@@ -56,3 +56,24 @@ bool ws_bridge_slot_is_bound(uint8_t slot);
  * time. Other errors come from the Bluetooth stack.
  */
 esp_err_t ws_bridge_command(uint8_t slot, const uint8_t *data, size_t len, uint32_t connect_timeout_ms);
+
+/**
+ * Make sure the storage in `slot` is connected, connecting for it when nothing holds it, and wait
+ * up to `connect_timeout_ms`. Without a browser watching, the hold time starts again afterwards.
+ * Same errors as ws_bridge_command().
+ */
+esp_err_t ws_bridge_ensure_connected(uint8_t slot, uint32_t connect_timeout_ms);
+
+/** Browsers currently on the WebSocket. */
+int ws_bridge_client_count(void);
+
+/** Name and address bound to a slot; empty strings when the slot is free. */
+const char *ws_bridge_slot_name(uint8_t slot);
+const char *ws_bridge_slot_address(uint8_t slot);
+
+/**
+ * Seconds the storage links are kept once no browser is watching and no command came in. Stored,
+ * 5 to 3600; ESP_ERR_INVALID_ARG outside that range.
+ */
+uint16_t ws_bridge_hold_seconds(void);
+esp_err_t ws_bridge_set_hold_seconds(uint16_t seconds);
