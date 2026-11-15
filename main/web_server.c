@@ -6,9 +6,11 @@
 #include <sys/stat.h>
 
 #include "auth.h"
+#include "ble_central.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "ota_update.h"
+#include "rest_api.h"
 #include "storage.h"
 #include "wifi.h"
 #include "wifi_setup.h"
@@ -54,8 +56,9 @@ static esp_err_t api_bridge_get(httpd_req_t *req)
 {
     char body[128];
     snprintf(body, sizeof(body),
-             "{\"bridge\":\"marstek-ble-control\",\"version\":1,"
+             "{\"bridge\":\"marstek-ble-control\",\"version\":%d,\"slots\":%d,"
              "\"claimed\":%s,\"authenticated\":%s}",
+             WS_BRIDGE_PROTOCOL_VERSION, BLE_MAX_SLOTS,
              auth_is_claimed() ? "true" : "false",
              auth_request_is_authenticated(req) ? "true" : "false");
 
@@ -172,7 +175,7 @@ esp_err_t web_server_start(void)
     config.lru_purge_enable = true;
     config.stack_size = 8192;
     // Default is 8, and the api routes alone are well past that now.
-    config.max_uri_handlers = 24;
+    config.max_uri_handlers = 32;
 
     httpd_handle_t server = NULL;
     esp_err_t err = httpd_start(&server, &config);
@@ -192,6 +195,7 @@ esp_err_t web_server_start(void)
     ESP_ERROR_CHECK(wifi_setup_register_handlers(server));
     ESP_ERROR_CHECK(ota_update_register_handlers(server));
     ESP_ERROR_CHECK(ws_bridge_start(server));
+    ESP_ERROR_CHECK(rest_api_register_handlers(server));
 
     // Registered last so the API routes above win; the wildcard is the fallback.
     const httpd_uri_t static_files = {

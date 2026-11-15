@@ -1,11 +1,14 @@
 #include "ws_bridge.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "auth.h"
 #include "ble_central.h"
 #include "cJSON.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -14,21 +17,18 @@
 
 static const char *TAG = "ws";
 
-// How long the storage link is kept after the last browser goes away. A page reload is a client
-// leaving and coming back within a second, and tearing the Bluetooth link down for that is what
+// How long the storage links are kept after the last browser goes away. A page reload is a client
+// leaving and coming back within a second, and tearing the Bluetooth links down for that is what
 // made every reload land on a dashboard with no data behind it.
 #define LINGER_AFTER_LAST_CLIENT_MS 15000
 
 #define NVS_NAMESPACE "bridge"
-#define NVS_KEY_BOUND_ADDR "bound_addr"
-#define NVS_KEY_BOUND_NAME "bound_name"
-#define NVS_KEY_BOUND_TYPE "bound_type"
 
 // Outbound binary frames are BLE notifications, which never exceed the negotiated MTU. The inbound
-// direction carries one extra prefix byte.
+// direction carries two extra prefix bytes: the slot and the write kind.
 #define MAX_FRAME 640
 
-/** Write kind, encoded as the first byte of every inbound binary frame. */
+/** Write kind, the second byte of every inbound binary frame (the first one is the slot). */
 #define WRITE_WITHOUT_RESPONSE 0x00
 #define WRITE_WITH_RESPONSE 0x01
 
@@ -45,56 +45,135 @@ static uint32_t s_sends_ok = 0;
 static uint32_t s_sends_failed = 0;
 static uint32_t s_frames_in = 0;
 
-static char s_bound_addr[BLE_ADDR_STR_LEN];
-static char s_bound_name[BLE_NAME_MAX];
-static uint8_t s_bound_type = BLE_ADDR_TYPE_UNKNOWN;
+/* ------------------------------------------------------------------------------------ bindings */
 
-static void load_binding(void)
+typedef struct {
+    char addr[BLE_ADDR_STR_LEN];
+    char name[BLE_NAME_MAX];
+    uint8_t type;
+} binding_t;
+
+static binding_t s_bound[BLE_MAX_SLOTS];
+
+/**
+ * NVS key for one slot's field. Slot 0 keeps the key names from when the bridge only knew one
+ * storage, so an installation that is updated finds its binding where it left it.
+ */
+static void binding_key(uint8_t slot, const char *base, char *out, size_t len)
+{
+    if (slot == 0) {
+        snprintf(out, len, "%s", base);
+    } else {
+        snprintf(out, len, "%s%u", base, (unsigned) slot);
+    }
+}
+
+static bool is_bound(uint8_t slot)
+{
+    return slot < BLE_MAX_SLOTS && s_bound[slot].addr[0] != '\0';
+}
+
+static void load_bindings(void)
 {
     nvs_handle_t nvs;
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) {
         return;
     }
 
-    size_t len = sizeof(s_bound_addr);
-    if (nvs_get_str(nvs, NVS_KEY_BOUND_ADDR, s_bound_addr, &len) != ESP_OK) {
-        s_bound_addr[0] = '\0';
-    }
+    for (uint8_t slot = 0; slot < BLE_MAX_SLOTS; slot++) {
+        binding_t *b = &s_bound[slot];
+        char key[16];
 
-    len = sizeof(s_bound_name);
-    if (nvs_get_str(nvs, NVS_KEY_BOUND_NAME, s_bound_name, &len) != ESP_OK) {
-        s_bound_name[0] = '\0';
-    }
+        binding_key(slot, "bound_addr", key, sizeof(key));
+        size_t len = sizeof(b->addr);
+        if (nvs_get_str(nvs, key, b->addr, &len) != ESP_OK) {
+            b->addr[0] = '\0';
+        }
 
-    // Remembered from the scan that bound this device. Without it a reconnect after a reboot would
-    // have to guess, and guessing wrong means the connection never starts.
-    if (nvs_get_u8(nvs, NVS_KEY_BOUND_TYPE, &s_bound_type) != ESP_OK) {
-        s_bound_type = BLE_ADDR_TYPE_UNKNOWN;
+        binding_key(slot, "bound_name", key, sizeof(key));
+        len = sizeof(b->name);
+        if (nvs_get_str(nvs, key, b->name, &len) != ESP_OK) {
+            b->name[0] = '\0';
+        }
+
+        // Remembered from the scan that bound this device. Without it a reconnect after a reboot
+        // would have to guess, and guessing wrong means the connection never starts.
+        binding_key(slot, "bound_type", key, sizeof(key));
+        if (nvs_get_u8(nvs, key, &b->type) != ESP_OK) {
+            b->type = BLE_ADDR_TYPE_UNKNOWN;
+        }
+
+        if (b->addr[0]) {
+            ESP_LOGI(TAG, "Slot %u is bound to %s (%s)", (unsigned) slot, b->name, b->addr);
+        }
     }
 
     nvs_close(nvs);
-
-    if (s_bound_addr[0]) {
-        ESP_LOGI(TAG, "Bound to %s (%s)", s_bound_name, s_bound_addr);
-    }
 }
 
-static void store_binding(const char *address, const char *name)
+static void store_binding(uint8_t slot, const char *address, const char *name)
 {
-    strlcpy(s_bound_addr, address, sizeof(s_bound_addr));
-    strlcpy(s_bound_name, name ? name : "", sizeof(s_bound_name));
-    s_bound_type = ble_central_addr_type_for(address);
+    binding_t *b = &s_bound[slot];
+    strlcpy(b->addr, address, sizeof(b->addr));
+    strlcpy(b->name, name ? name : "", sizeof(b->name));
+    b->type = ble_central_addr_type_for(address);
 
     nvs_handle_t nvs;
     if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs) != ESP_OK) {
         return;
     }
 
-    nvs_set_str(nvs, NVS_KEY_BOUND_ADDR, s_bound_addr);
-    nvs_set_str(nvs, NVS_KEY_BOUND_NAME, s_bound_name);
-    nvs_set_u8(nvs, NVS_KEY_BOUND_TYPE, s_bound_type);
+    char key[16];
+    binding_key(slot, "bound_addr", key, sizeof(key));
+    nvs_set_str(nvs, key, b->addr);
+    binding_key(slot, "bound_name", key, sizeof(key));
+    nvs_set_str(nvs, key, b->name);
+    binding_key(slot, "bound_type", key, sizeof(key));
+    nvs_set_u8(nvs, key, b->type);
     nvs_commit(nvs);
     nvs_close(nvs);
+}
+
+static void clear_binding(uint8_t slot)
+{
+    memset(&s_bound[slot], 0, sizeof(s_bound[slot]));
+    s_bound[slot].type = BLE_ADDR_TYPE_UNKNOWN;
+
+    nvs_handle_t nvs;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs) != ESP_OK) {
+        return;
+    }
+
+    char key[16];
+    binding_key(slot, "bound_addr", key, sizeof(key));
+    nvs_erase_key(nvs, key);
+    binding_key(slot, "bound_name", key, sizeof(key));
+    nvs_erase_key(nvs, key);
+    binding_key(slot, "bound_type", key, sizeof(key));
+    nvs_erase_key(nvs, key);
+    nvs_commit(nvs);
+    nvs_close(nvs);
+}
+
+/** Which slot holds this address, or -1. Used to refuse the same storage twice. */
+static int slot_holding(const char *address)
+{
+    for (uint8_t slot = 0; slot < BLE_MAX_SLOTS; slot++) {
+        if (s_bound[slot].addr[0] && strcasecmp(s_bound[slot].addr, address) == 0) {
+            return slot;
+        }
+    }
+    return -1;
+}
+
+int ws_bridge_slot_for_address(const char *address)
+{
+    return address ? slot_holding(address) : -1;
+}
+
+bool ws_bridge_slot_is_bound(uint8_t slot)
+{
+    return is_bound(slot);
 }
 
 /* ------------------------------------------------------------------------------ sending out */
@@ -111,16 +190,23 @@ static esp_timer_handle_t s_refresh_timer;
  */
 #define REFRESH_RETRIES 3
 
-static int s_refresh_left;
+static int s_refresh_left[BLE_MAX_SLOTS];
+// Slots whose link is to be brought up again when the refresh timer fires.
+static uint8_t s_refresh_mask;
 
 // Set while no browser is watching. A storage link that was left running with nobody on it stops
 // answering - the writes still go out and are still accepted, and nothing comes back - so it is
 // refreshed rather than handed over as it is.
 static bool s_link_abandoned = false;
 
+// A command that came in over REST waits for the link it asked for; the state callback ends the
+// wait. One semaphore per slot, because two slots can be connecting at once.
+static SemaphoreHandle_t s_connect_wait[BLE_MAX_SLOTS];
+static volatile bool s_waiting[BLE_MAX_SLOTS];
+
 static int client_count(void);
 
-/** Nobody came back, so let the storage go. */
+/** Nobody came back, so let the storages go. */
 static void linger_expired(void *arg)
 {
     (void) arg;
@@ -129,9 +215,9 @@ static void linger_expired(void *arg)
         return;
     }
 
-    ESP_LOGI(TAG, "Nobody came back - releasing the storage");
+    ESP_LOGI(TAG, "Nobody came back - releasing the storages");
     s_link_abandoned = false;
-    ble_central_disconnect();
+    ble_central_disconnect_all();
 }
 
 static void cancel_linger(void)
@@ -141,38 +227,31 @@ static void cancel_linger(void)
     }
 }
 
-/** Reconnect once the old link has finished going away. */
+/** Reconnect once the old links have finished going away. */
 static void refresh_link(void *arg)
 {
     (void) arg;
 
-    if (client_count() == 0 || !s_bound_addr[0]) {
+    if (client_count() == 0) {
+        s_refresh_mask = 0;
         return;
     }
 
-    ESP_LOGI(TAG, "Re-establishing the storage link for the browser that just arrived");
-    ble_central_connect(s_bound_addr, s_bound_type);
+    for (uint8_t slot = 0; slot < BLE_MAX_SLOTS; slot++) {
+        if (!(s_refresh_mask & (1u << slot))) {
+            continue;
+        }
+        s_refresh_mask &= (uint8_t) ~(1u << slot);
+
+        if (is_bound(slot)) {
+            ESP_LOGI(TAG, "Re-establishing slot %u for the browser that just arrived", (unsigned) slot);
+            ble_central_connect(slot, s_bound[slot].addr, s_bound[slot].type);
+        }
+    }
 }
 
-/**
- * Hand a returning browser a link that actually talks.
- *
- * Keeping the link across a reload is what stops every refresh from dropping the battery, but a
- * link nobody used in the meantime comes back mute: the storage accepts writes and answers none
- * of them. Cycling it is the only thing found to bring it back.
- */
-static void refresh_abandoned_link(void)
+static void arm_refresh_timer(uint32_t delay_ms)
 {
-    if (!s_link_abandoned) {
-        return;
-    }
-
-    s_link_abandoned = false;
-
-    if (!ble_central_is_connected()) {
-        return;
-    }
-
     if (!s_refresh_timer) {
         const esp_timer_create_args_t args = { .callback = &refresh_link, .name = "ws_refresh" };
         if (esp_timer_create(&args, &s_refresh_timer) != ESP_OK) {
@@ -180,10 +259,39 @@ static void refresh_abandoned_link(void)
         }
     }
 
-    s_refresh_left = REFRESH_RETRIES;
-    ble_central_disconnect();
     esp_timer_stop(s_refresh_timer);
-    esp_timer_start_once(s_refresh_timer, 1200 * 1000);
+    esp_timer_start_once(s_refresh_timer, (uint64_t) delay_ms * 1000);
+}
+
+/**
+ * Hand a returning browser links that actually talk.
+ *
+ * Keeping the links across a reload is what stops every refresh from dropping the battery, but a
+ * link nobody used in the meantime comes back mute: the storage accepts writes and answers none
+ * of them. Cycling it is the only thing found to bring it back.
+ */
+static void refresh_abandoned_links(void)
+{
+    if (!s_link_abandoned) {
+        return;
+    }
+
+    s_link_abandoned = false;
+
+    bool any = false;
+    for (uint8_t slot = 0; slot < BLE_MAX_SLOTS; slot++) {
+        if (!ble_central_is_connected(slot)) {
+            continue;
+        }
+        s_refresh_left[slot] = REFRESH_RETRIES;
+        s_refresh_mask |= (uint8_t) (1u << slot);
+        ble_central_disconnect(slot);
+        any = true;
+    }
+
+    if (any) {
+        arm_refresh_timer(1200);
+    }
 }
 
 static void start_linger(void)
@@ -192,8 +300,8 @@ static void start_linger(void)
         const esp_timer_create_args_t args = { .callback = &linger_expired, .name = "ws_linger" };
         if (esp_timer_create(&args, &s_linger_timer) != ESP_OK) {
             // No timer, no grace period - fall back to the old behaviour rather than holding the
-            // battery's only connection forever.
-            ble_central_disconnect();
+            // batteries' connections forever.
+            ble_central_disconnect_all();
             return;
         }
     }
@@ -201,7 +309,7 @@ static void start_linger(void)
     s_link_abandoned = true;
     esp_timer_stop(s_linger_timer);
     esp_timer_start_once(s_linger_timer, (uint64_t) LINGER_AFTER_LAST_CLIENT_MS * 1000);
-    ESP_LOGI(TAG, "Last browser left - holding the storage for %d s in case it comes back",
+    ESP_LOGI(TAG, "Nobody watching - holding the storages for %d s in case a browser comes back",
              LINGER_AFTER_LAST_CLIENT_MS / 1000);
 }
 
@@ -263,7 +371,7 @@ static esp_err_t send_to(int fd, httpd_ws_type_t type, const uint8_t *payload, s
     return err;
 }
 
-/** Everything the storage says goes to every browser watching. */
+/** Everything the storages say goes to every browser watching. */
 static esp_err_t send_frame(httpd_ws_type_t type, const uint8_t *payload, size_t len)
 {
     if (s_server == NULL) {
@@ -294,7 +402,6 @@ static void send_json(cJSON *json)
 static const char *state_name(ble_state_t state)
 {
     switch (state) {
-        case BLE_STATE_SCANNING:     return "scanning";
         case BLE_STATE_CONNECTING:   return "connecting";
         case BLE_STATE_CONNECTED:    return "connected";
         case BLE_STATE_DISCONNECTED: return "disconnected";
@@ -310,24 +417,25 @@ static const char *state_name(ble_state_t state)
  * connected model. Sending it once would make both depend on the client having caught one
  * particular message.
  */
-static void send_status(ble_state_t state, const char *msg)
+static void send_status(uint8_t slot, ble_state_t state, const char *msg)
 {
     cJSON *json = cJSON_CreateObject();
     cJSON_AddStringToObject(json, "t", "status");
+    cJSON_AddNumberToObject(json, "slot", slot);
     cJSON_AddStringToObject(json, "state", state_name(state));
 
-    const char *name = ble_central_device_name();
-    cJSON_AddStringToObject(json, "deviceName", name[0] ? name : s_bound_name);
+    const char *name = ble_central_device_name(slot);
+    cJSON_AddStringToObject(json, "deviceName", name[0] ? name : s_bound[slot].name);
 
-    const char *addr = ble_central_device_address();
-    cJSON_AddStringToObject(json, "address", addr[0] ? addr : s_bound_addr);
+    const char *addr = ble_central_device_address(slot);
+    cJSON_AddStringToObject(json, "address", addr[0] ? addr : s_bound[slot].addr);
 
     if (state == BLE_STATE_CONNECTED) {
-        cJSON_AddNumberToObject(json, "rssi", ble_central_rssi());
+        cJSON_AddNumberToObject(json, "rssi", ble_central_rssi(slot));
         // Visible in the browser on purpose: 23 means the exchange did not happen, which caps
         // every notification at 20 bytes and is the first thing to suspect when a storage that
         // answers over Web Bluetooth stays silent here.
-        cJSON_AddNumberToObject(json, "mtu", ble_central_mtu());
+        cJSON_AddNumberToObject(json, "mtu", ble_central_mtu(slot));
     }
 
     // The bridge's own link matters as much as the Bluetooth one: a relayed frame crosses both,
@@ -347,15 +455,18 @@ static char *hello_json(void)
 {
     cJSON *json = cJSON_CreateObject();
     cJSON_AddStringToObject(json, "t", "hello");
-    cJSON_AddNumberToObject(json, "version", 1);
+    cJSON_AddNumberToObject(json, "version", WS_BRIDGE_PROTOCOL_VERSION);
 
-    if (s_bound_addr[0]) {
-        cJSON *bound = cJSON_CreateObject();
-        cJSON_AddStringToObject(bound, "name", s_bound_name);
-        cJSON_AddStringToObject(bound, "address", s_bound_addr);
-        cJSON_AddItemToObject(json, "bound", bound);
-    } else {
-        cJSON_AddNullToObject(json, "bound");
+    cJSON *slots = cJSON_AddArrayToObject(json, "slots");
+    for (uint8_t slot = 0; slot < BLE_MAX_SLOTS; slot++) {
+        if (is_bound(slot)) {
+            cJSON *bound = cJSON_CreateObject();
+            cJSON_AddStringToObject(bound, "name", s_bound[slot].name);
+            cJSON_AddStringToObject(bound, "address", s_bound[slot].addr);
+            cJSON_AddItemToArray(slots, bound);
+        } else {
+            cJSON_AddItemToArray(slots, cJSON_CreateNull());
+        }
     }
 
     char *text = cJSON_PrintUnformatted(json);
@@ -363,10 +474,13 @@ static char *hello_json(void)
     return text;
 }
 
-static void send_error(const char *code, const char *msg)
+static void send_error(uint8_t slot, const char *code, const char *msg)
 {
     cJSON *json = cJSON_CreateObject();
     cJSON_AddStringToObject(json, "t", "error");
+    if (slot != BLE_SLOT_NONE) {
+        cJSON_AddNumberToObject(json, "slot", slot);
+    }
     cJSON_AddStringToObject(json, "code", code);
     cJSON_AddStringToObject(json, "msg", msg);
     send_json(json);
@@ -374,25 +488,39 @@ static void send_error(const char *code, const char *msg)
 
 /* ------------------------------------------------------------------------- BLE -> WebSocket */
 
-static void on_ble_notify(const uint8_t *data, size_t len)
+// One notification is one frame, with the slot in front. Only the NimBLE host task writes here,
+// so a single buffer does; a second copy on that task's small stack would not.
+static uint8_t s_notify_frame[1 + 512];
+
+static void on_ble_notify(uint8_t slot, const uint8_t *data, size_t len)
 {
-    send_frame(HTTPD_WS_TYPE_BINARY, data, len);
+    if (len > sizeof(s_notify_frame) - 1) {
+        return;
+    }
+
+    s_notify_frame[0] = slot;
+    memcpy(s_notify_frame + 1, data, len);
+    send_frame(HTTPD_WS_TYPE_BINARY, s_notify_frame, len + 1);
 }
 
-static void on_ble_state(ble_state_t state, const char *msg)
+static void on_ble_state(uint8_t slot, ble_state_t state, const char *msg)
 {
-    send_status(state, msg);
+    send_status(slot, state, msg);
+
+    // Somebody asked over REST and is waiting for the outcome.
+    if (s_waiting[slot] && (state == BLE_STATE_CONNECTED || state == BLE_STATE_ERROR)) {
+        xSemaphoreGive(s_connect_wait[slot]);
+    }
 
     // A refresh that the storage refused. It usually takes the next one.
-    if (state == BLE_STATE_ERROR && s_refresh_left > 0 && client_count() > 0) {
-        s_refresh_left--;
-        ESP_LOGI(TAG, "Refresh refused, %d attempt(s) left", s_refresh_left);
-        if (s_refresh_timer) {
-            esp_timer_stop(s_refresh_timer);
-            esp_timer_start_once(s_refresh_timer, 2500 * 1000);
-        }
+    if (state == BLE_STATE_ERROR && s_refresh_left[slot] > 0 && client_count() > 0) {
+        s_refresh_left[slot]--;
+        ESP_LOGI(TAG, "Slot %u: refresh refused, %d attempt(s) left", (unsigned) slot,
+                 s_refresh_left[slot]);
+        s_refresh_mask |= (uint8_t) (1u << slot);
+        arm_refresh_timer(2500);
     } else if (state == BLE_STATE_CONNECTED) {
-        s_refresh_left = 0;
+        s_refresh_left[slot] = 0;
     }
 }
 
@@ -413,20 +541,83 @@ static void on_scan_finished(const ble_device_t *devices, size_t count)
     send_json(json);
 }
 
+/* ------------------------------------------------------------------------- REST entry point */
+
+esp_err_t ws_bridge_command(uint8_t slot, const uint8_t *data, size_t len, uint32_t connect_timeout_ms)
+{
+    if (!is_bound(slot)) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    if (!ble_central_is_connected(slot)) {
+        // Nobody holds this storage right now, which is the normal case for a home automation
+        // that sends a command every few hours. Connect for the command and let the usual
+        // linger release it afterwards - the storage takes one connection at a time per phone
+        // app, so holding it forever would lock the vendor app out.
+        xSemaphoreTake(s_connect_wait[slot], 0);
+        s_waiting[slot] = true;
+
+        esp_err_t err = ble_central_connect(slot, s_bound[slot].addr, s_bound[slot].type);
+        if (err == ESP_OK) {
+            xSemaphoreTake(s_connect_wait[slot], pdMS_TO_TICKS(connect_timeout_ms));
+        }
+        s_waiting[slot] = false;
+
+        if (err != ESP_OK) {
+            return err;
+        }
+        if (!ble_central_is_connected(slot)) {
+            return ESP_ERR_TIMEOUT;
+        }
+    }
+
+    const esp_err_t err = ble_central_write(slot, data, len, true);
+
+    // With a browser on the page the links stay as they are. Without one, restart the countdown
+    // so the storage is released a little after the last command and not in the middle of it.
+    if (client_count() == 0) {
+        start_linger();
+    }
+
+    return err;
+}
+
 /* ------------------------------------------------------------------------- WebSocket -> BLE */
+
+/** The slot a control message is about. Absent means 0, which is also what the old protocol meant. */
+static bool message_slot(const cJSON *json, uint8_t *slot)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(json, "slot");
+    if (item == NULL) {
+        *slot = 0;
+        return true;
+    }
+    if (!cJSON_IsNumber(item) || item->valuedouble < 0 || item->valuedouble >= BLE_MAX_SLOTS) {
+        return false;
+    }
+    *slot = (uint8_t) item->valuedouble;
+    return true;
+}
 
 static void handle_control(const char *text, size_t len)
 {
     cJSON *json = cJSON_ParseWithLength(text, len);
     if (!json) {
-        send_error("bad_message", "Not valid JSON");
+        send_error(BLE_SLOT_NONE, "bad_message", "Not valid JSON");
         return;
     }
 
     const cJSON *type = cJSON_GetObjectItemCaseSensitive(json, "t");
     if (!cJSON_IsString(type)) {
         cJSON_Delete(json);
-        send_error("bad_message", "Missing message type");
+        send_error(BLE_SLOT_NONE, "bad_message", "Missing message type");
+        return;
+    }
+
+    uint8_t slot = 0;
+    if (!message_slot(json, &slot)) {
+        cJSON_Delete(json);
+        send_error(BLE_SLOT_NONE, "bad_message", "Unknown slot");
         return;
     }
 
@@ -436,16 +627,16 @@ static void handle_control(const char *text, size_t len)
         // it got.
         cancel_linger();
 
-        if (!s_bound_addr[0]) {
-            send_error("not_bound", "No storage selected yet");
-        } else if (ble_central_connect(s_bound_addr, s_bound_type) != ESP_OK) {
+        if (!is_bound(slot)) {
+            send_error(slot, "not_bound", "No storage selected yet");
+        } else if (ble_central_connect(slot, s_bound[slot].addr, s_bound[slot].type) != ESP_OK) {
             // The reason already went out as an error status carrying the NimBLE code; this is
             // only the coarse signal that the attempt did not get off the ground.
-            send_error("connect_failed", "Could not start connecting");
+            send_error(slot, "connect_failed", "Could not start connecting");
         }
 
     } else if (strcmp(type->valuestring, "disconnect") == 0) {
-        ble_central_disconnect();
+        ble_central_disconnect(slot);
 
     } else if (strcmp(type->valuestring, "scan") == 0) {
         const cJSON *seconds = cJSON_GetObjectItemCaseSensitive(json, "seconds");
@@ -454,20 +645,37 @@ static void handle_control(const char *text, size_t len)
             duration = 5;
         }
         if (ble_central_scan(duration, on_scan_finished) != ESP_OK) {
-            send_error("scan_failed", "Could not start scanning");
+            send_error(BLE_SLOT_NONE, "scan_failed", "Could not start scanning");
         }
 
     } else if (strcmp(type->valuestring, "bind") == 0) {
         const cJSON *address = cJSON_GetObjectItemCaseSensitive(json, "address");
         const cJSON *name = cJSON_GetObjectItemCaseSensitive(json, "name");
         if (!cJSON_IsString(address)) {
-            send_error("bad_message", "bind needs an address");
+            send_error(slot, "bad_message", "bind needs an address");
         } else {
-            store_binding(address->valuestring, cJSON_IsString(name) ? name->valuestring : NULL);
-            ble_central_set_device_name(s_bound_name);
-            ESP_LOGI(TAG, "Bound to %s", s_bound_addr);
-            send_status(BLE_STATE_IDLE, NULL);
+            const int holder = slot_holding(address->valuestring);
+            if (holder >= 0 && holder != slot) {
+                // Two slots on one storage would fight over its single connection.
+                send_error(slot, "already_bound", "That storage is already in another slot");
+            } else {
+                // A different storage moving in: the old link is no longer the one that is wanted.
+                if (!is_bound(slot) || strcasecmp(s_bound[slot].addr, address->valuestring) != 0) {
+                    ble_central_disconnect(slot);
+                }
+                store_binding(slot, address->valuestring, cJSON_IsString(name) ? name->valuestring : NULL);
+                ble_central_set_device_name(slot, s_bound[slot].name);
+                ESP_LOGI(TAG, "Slot %u bound to %s", (unsigned) slot, s_bound[slot].addr);
+                send_status(slot, BLE_STATE_IDLE, NULL);
+            }
         }
+
+    } else if (strcmp(type->valuestring, "unbind") == 0) {
+        ble_central_disconnect(slot);
+        clear_binding(slot);
+        ble_central_set_device_name(slot, "");
+        ESP_LOGI(TAG, "Slot %u cleared", (unsigned) slot);
+        send_status(slot, BLE_STATE_IDLE, NULL);
 
     } else {
         ESP_LOGW(TAG, "Ignoring unknown message type %s", type->valuestring);
@@ -504,10 +712,10 @@ static esp_err_t ws_post_handshake(httpd_req_t *req)
         return ESP_OK;
     }
 
-    // Somebody is watching again, so the storage is not going anywhere - but the link it was
-    // left on has to be refreshed before it is any use.
+    // Somebody is watching again, so the storages are not going anywhere - but the links they
+    // were left on have to be refreshed before they are any use.
     cancel_linger();
-    refresh_abandoned_link();
+    refresh_abandoned_links();
 
     ESP_LOGI(TAG, "Client connected (fd %d), %d now watching", fd, client_count());
 
@@ -517,7 +725,11 @@ static esp_err_t ws_post_handshake(httpd_req_t *req)
         send_to(fd, HTTPD_WS_TYPE_TEXT, (const uint8_t *) hello, strlen(hello));
         cJSON_free(hello);
     }
-    send_status(ble_central_is_connected() ? BLE_STATE_CONNECTED : BLE_STATE_IDLE, NULL);
+    for (uint8_t slot = 0; slot < BLE_MAX_SLOTS; slot++) {
+        if (is_bound(slot)) {
+            send_status(slot, ble_central_is_connected(slot) ? BLE_STATE_CONNECTED : BLE_STATE_IDLE, NULL);
+        }
+    }
 
     return ESP_OK;
 }
@@ -548,16 +760,23 @@ static esp_err_t ws_handler(httpd_req_t *req)
             handle_control((const char *) buf, frame.len);
             break;
 
-        case HTTPD_WS_TYPE_BINARY:
+        case HTTPD_WS_TYPE_BINARY: {
             s_frames_in++;
-            if (frame.len < 2) {
+            // Slot, write kind, then at least one byte of payload.
+            if (frame.len < 3) {
                 break;
             }
-            // First byte selects the write kind; the rest goes to the storage untouched.
-            if (ble_central_write(buf + 1, frame.len - 1, buf[0] == WRITE_WITH_RESPONSE) != ESP_OK) {
-                send_error("write_failed", "Not connected to a storage");
+            const uint8_t slot = buf[0];
+            if (slot >= BLE_MAX_SLOTS) {
+                send_error(BLE_SLOT_NONE, "bad_message", "Unknown slot");
+                break;
+            }
+            // The rest goes to the storage untouched.
+            if (ble_central_write(slot, buf + 2, frame.len - 2, buf[1] == WRITE_WITH_RESPONSE) != ESP_OK) {
+                send_error(slot, "write_failed", "Not connected to a storage");
             }
             break;
+        }
 
         case HTTPD_WS_TYPE_CLOSE: {
             const int fd = httpd_req_to_sockfd(req);
@@ -587,47 +806,68 @@ static esp_err_t ws_handler(httpd_req_t *req)
  *
  * Debugging this from a browser two floors away meant one guess per firmware upload. Numbers that
  * can simply be read - notifications in, sends out, writes, handles, MTU - turn that into looking.
+ * The heap figures are here for the same reason: how many storages fit is a question for numbers.
  */
 void ws_bridge_stats_json(char *out, size_t len)
 {
-    ble_stats_t b;
-    ble_central_stats(&b);
+    size_t used = 0;
 
-    snprintf(out, len,
-             "{\"ble\":{"
-             "\"connected\":%s,\"encrypted\":%s,\"encStatus\":%u,"
-             "\"subscribed\":%s,\"subscribedTx\":%s,\"cccdWritten\":%u,"
-             "\"mtu\":%u,\"txHandle\":%u,\"rxHandle\":%u,\"cccdHandle\":%u,"
-             "\"txProps\":%u,\"rxProps\":%u,"
-             "\"notifications\":%u,\"notifyBytes\":%u,"
-             "\"writesOk\":%u,\"writesFailed\":%u,"
-             "\"writeAcks\":%u,\"writeRejects\":%u,\"lastWriteError\":%u"
-             "},\"ws\":{"
-             "\"clients\":%d,\"framesIn\":%u,\"sendsOk\":%u,\"sendsFailed\":%u"
-             "}}",
-             b.connected ? "true" : "false",
-             b.encrypted ? "true" : "false",
-             (unsigned) b.last_enc_status,
-             b.subscribed ? "true" : "false",
-             b.subscribed_tx ? "true" : "false",
-             (unsigned) b.cccd_written,
-             (unsigned) b.mtu,
-             (unsigned) b.tx_handle,
-             (unsigned) b.rx_handle,
-             (unsigned) b.cccd_handle,
-             (unsigned) b.tx_props,
-             (unsigned) b.rx_props,
-             (unsigned) b.notifications,
-             (unsigned) b.notify_bytes,
-             (unsigned) b.writes_ok,
-             (unsigned) b.writes_failed,
-             (unsigned) b.write_acks,
-             (unsigned) b.write_rejects,
-             (unsigned) b.last_write_error,
-             client_count(),
-             (unsigned) s_frames_in,
-             (unsigned) s_sends_ok,
-             (unsigned) s_sends_failed);
+#define APPEND(...) do { \
+        if (used < len) { \
+            int n_ = snprintf(out + used, len - used, __VA_ARGS__); \
+            if (n_ > 0) used += (size_t) n_; \
+        } \
+    } while (0)
+
+    APPEND("{\"ble\":[");
+
+    for (uint8_t slot = 0; slot < BLE_MAX_SLOTS; slot++) {
+        ble_stats_t b;
+        ble_central_stats(slot, &b);
+
+        APPEND("%s{\"slot\":%u,\"bound\":%s,"
+               "\"connected\":%s,\"encrypted\":%s,\"encStatus\":%u,"
+               "\"subscribed\":%s,\"subscribedTx\":%s,\"cccdWritten\":%u,"
+               "\"mtu\":%u,\"txHandle\":%u,\"rxHandle\":%u,\"cccdHandle\":%u,"
+               "\"txProps\":%u,\"rxProps\":%u,"
+               "\"notifications\":%u,\"notifyBytes\":%u,"
+               "\"writesOk\":%u,\"writesFailed\":%u,"
+               "\"writeAcks\":%u,\"writeRejects\":%u,\"lastWriteError\":%u}",
+               slot ? "," : "",
+               (unsigned) slot,
+               is_bound(slot) ? "true" : "false",
+               b.connected ? "true" : "false",
+               b.encrypted ? "true" : "false",
+               (unsigned) b.last_enc_status,
+               b.subscribed ? "true" : "false",
+               b.subscribed_tx ? "true" : "false",
+               (unsigned) b.cccd_written,
+               (unsigned) b.mtu,
+               (unsigned) b.tx_handle,
+               (unsigned) b.rx_handle,
+               (unsigned) b.cccd_handle,
+               (unsigned) b.tx_props,
+               (unsigned) b.rx_props,
+               (unsigned) b.notifications,
+               (unsigned) b.notify_bytes,
+               (unsigned) b.writes_ok,
+               (unsigned) b.writes_failed,
+               (unsigned) b.write_acks,
+               (unsigned) b.write_rejects,
+               (unsigned) b.last_write_error);
+    }
+
+    APPEND("],\"ws\":{\"clients\":%d,\"framesIn\":%u,\"sendsOk\":%u,\"sendsFailed\":%u},"
+           "\"heap\":{\"free\":%u,\"minFree\":%u,\"largestBlock\":%u}}",
+           client_count(),
+           (unsigned) s_frames_in,
+           (unsigned) s_sends_ok,
+           (unsigned) s_sends_failed,
+           (unsigned) esp_get_free_heap_size(),
+           (unsigned) esp_get_minimum_free_heap_size(),
+           (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
+#undef APPEND
 }
 
 void ws_bridge_session_closed(int fd)
@@ -651,14 +891,25 @@ esp_err_t ws_bridge_start(httpd_handle_t server)
         return ESP_ERR_NO_MEM;
     }
 
-    load_binding();
-    if (s_bound_name[0]) {
-        ble_central_set_device_name(s_bound_name);
+    for (uint8_t slot = 0; slot < BLE_MAX_SLOTS; slot++) {
+        s_connect_wait[slot] = xSemaphoreCreateBinary();
+        if (!s_connect_wait[slot]) {
+            return ESP_ERR_NO_MEM;
+        }
+        s_bound[slot].type = BLE_ADDR_TYPE_UNKNOWN;
     }
+
+    load_bindings();
 
     esp_err_t err = ble_central_init(on_ble_notify, on_ble_state);
     if (err != ESP_OK) {
         return err;
+    }
+
+    for (uint8_t slot = 0; slot < BLE_MAX_SLOTS; slot++) {
+        if (s_bound[slot].name[0]) {
+            ble_central_set_device_name(slot, s_bound[slot].name);
+        }
     }
 
     const httpd_uri_t route = {

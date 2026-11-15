@@ -6,6 +6,17 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.1 — 2026-11-15
+**Beta.** Needs the matching web interface; older web apps do not work with this firmware and the
+other way round. Not yet tested against real storages in several slots.
+- **Three storages per bridge.** Each sits in its own slot; the interface has a slot bar. An existing
+  binding moves into slot 1 by itself. The control protocol is now version 2.
+- **REST interface for Home Assistant:** `POST /api/peak-shaving` switches peak shaving on or off
+  per slot, secured by an API token created in the interface (stored as a hash, shown once).
+  If nothing holds the storage, the bridge connects for the command and releases it again shortly
+  after. See the README.
+- `/api/diag` now lists every slot and reports the free heap, to judge how many connections fit.
+
 ## v1.3.19 — 2026-11-15
 - The version is shown in the footer and at the bottom of the mobile menu.
 - Firmware update: the transfer is isolated and a fresh connection is required before the next

@@ -1,12 +1,23 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "esp_err.h"
 
 #define BLE_ADDR_STR_LEN 18   /* "aa:bb:cc:dd:ee:ff" */
 #define BLE_NAME_MAX 32
+
+/**
+ * How many storages the bridge can hold at once. Every connection costs RAM on both the controller
+ * and the host side, and NimBLE is configured for exactly this many (BT_NIMBLE_MAX_CONNECTIONS) -
+ * change the two together.
+ */
+#define BLE_MAX_SLOTS 3
+
+/** Stand-in for "no slot", for the few messages that concern the radio rather than one storage. */
+#define BLE_SLOT_NONE 0xFF
 
 typedef struct {
     char name[BLE_NAME_MAX];
@@ -22,18 +33,17 @@ typedef struct {
 
 typedef enum {
     BLE_STATE_IDLE,
-    BLE_STATE_SCANNING,
     BLE_STATE_CONNECTING,
     BLE_STATE_CONNECTED,
     BLE_STATE_DISCONNECTED,
     BLE_STATE_ERROR,
 } ble_state_t;
 
-/** One inbound notification, exactly as the storage sent it. Runs on the NimBLE host task. */
-typedef void (*ble_notify_cb_t)(const uint8_t *data, size_t len);
+/** One inbound notification of the storage in `slot`, exactly as it sent it. Runs on the NimBLE host task. */
+typedef void (*ble_notify_cb_t)(uint8_t slot, const uint8_t *data, size_t len);
 
-/** Connection lifecycle. `msg` is NULL unless there is something worth saying. */
-typedef void (*ble_state_cb_t)(ble_state_t state, const char *msg);
+/** Connection lifecycle of one slot. `msg` is NULL unless there is something worth saying. */
+typedef void (*ble_state_cb_t)(uint8_t slot, ble_state_t state, const char *msg);
 
 /** Scan finished; `devices` is only valid for the duration of the call. */
 typedef void (*ble_scan_cb_t)(const ble_device_t *devices, size_t count);
@@ -44,26 +54,32 @@ esp_err_t ble_central_init(ble_notify_cb_t on_notify, ble_state_cb_t on_state);
 esp_err_t ble_central_scan(uint32_t seconds, ble_scan_cb_t on_result);
 
 /**
- * Connect to a device by address, discover the Marstek service and subscribe to notifications.
+ * Connect the storage in `slot` by address, discover the Marstek service and subscribe to
+ * notifications.
  *
  * Pass BLE_ADDR_TYPE_UNKNOWN to have the type looked up in the last scan results.
+ *
+ * The controller starts one connection at a time. A request that arrives while another slot is
+ * still connecting is remembered and started when that one is done, so callers can simply ask for
+ * all their slots in a row.
  */
-esp_err_t ble_central_connect(const char *address, uint8_t addr_type);
+esp_err_t ble_central_connect(uint8_t slot, const char *address, uint8_t addr_type);
 
 /** Address type the last scan saw for this address, or BLE_ADDR_TYPE_UNKNOWN. */
 uint8_t ble_central_addr_type_for(const char *address);
 
-void ble_central_disconnect(void);
+void ble_central_disconnect(uint8_t slot);
+void ble_central_disconnect_all(void);
 
-bool ble_central_is_connected(void);
+bool ble_central_is_connected(uint8_t slot);
 
-/** Name and address of the connected device; empty strings when there is none. */
-const char *ble_central_device_name(void);
-const char *ble_central_device_address(void);
-int8_t ble_central_rssi(void);
+/** Name and address of the connected device in `slot`; empty strings when there is none. */
+const char *ble_central_device_name(uint8_t slot);
+const char *ble_central_device_address(uint8_t slot);
+int8_t ble_central_rssi(uint8_t slot);
 
 /** Negotiated ATT MTU. 23 means no exchange happened, which caps notifications at 20 bytes. */
-uint16_t ble_central_mtu(void);
+uint16_t ble_central_mtu(uint8_t slot);
 
 /** Counters for the diagnostics endpoint - the alternative is guessing from a distance. */
 typedef struct {
@@ -95,17 +111,18 @@ typedef struct {
     bool connected;
 } ble_stats_t;
 
-void ble_central_stats(ble_stats_t *out);
+void ble_central_stats(uint8_t slot, ble_stats_t *out);
 
 /**
- * Write to the storage's TX characteristic. `with_response` picks between an acknowledged write
- * and a fire-and-forget one - regular commands use the former, OTA chunks the latter.
+ * Write to the TX characteristic of the storage in `slot`. `with_response` picks between an
+ * acknowledged write and a fire-and-forget one - regular commands use the former, OTA chunks the
+ * latter.
  */
-esp_err_t ble_central_write(const uint8_t *data, size_t len, bool with_response);
+esp_err_t ble_central_write(uint8_t slot, const uint8_t *data, size_t len, bool with_response);
 
 /**
  * Remember the advertised name of the bound device, so the app can tell which model it is talking
  * to without a round trip. Not cosmetic: it selects the dashboard and guards firmware updates
  * against the wrong model.
  */
-void ble_central_set_device_name(const char *name);
+void ble_central_set_device_name(uint8_t slot, const char *name);

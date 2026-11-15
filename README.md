@@ -130,6 +130,52 @@ Firmware goes into the slot it is not running from and is only booted once it is
 failed update changes nothing. A firmware that boots but cannot be reached falls back to the
 previous one by itself — which is what makes updating a board in a cellar reasonable at all.
 
+## Several storages
+
+One bridge holds up to **three storages** at once, each in its own slot. The interface shows a slot
+bar at the top: pick a slot, choose the device for it once, and it is remembered across restarts.
+Only the selected storage is polled; the others just keep their connection. A storage can sit in one
+slot only. An existing single-storage setup moves into slot 1 by itself when you update.
+
+Each connection costs RAM on the ESP32. The diagnostics endpoint (`/api/diag`, needs a login)
+reports `heap.free`, `heap.minFree` and `heap.largestBlock`, so you can see how much room is left
+with all slots connected.
+
+## Home automation (REST)
+
+For Home Assistant and similar systems the bridge has a small REST interface, so peak shaving can be
+switched without a browser. It is off until you create an API token (interface → *API token*). The
+token is shown once; the bridge keeps only its hash.
+
+```bash
+# on / off (power in watts, 0-2500; slot is 0, 1 or 2, or use "address" instead)
+curl -X POST http://marstek-bridge.local/api/peak-shaving \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"slot":0,"enabled":true,"power":600}'
+
+# what was sent last (the storage does not report this setting back)
+curl -H "Authorization: Bearer <token>" http://marstek-bridge.local/api/peak-shaving
+```
+
+```yaml
+# Home Assistant
+rest_command:
+  peak_shaving:
+    url: "http://marstek-bridge.local/api/peak-shaving"
+    method: POST
+    headers:
+      Authorization: "Bearer <token>"
+      Content-Type: "application/json"
+    payload: '{"slot":0,"enabled":{{ enabled }},"power":{{ power }}}'
+```
+
+If nothing holds the storage when a command arrives, the bridge connects for it (up to ~15 s),
+sends it, and lets go again shortly after. With one storage the slot may be left out. Answers:
+`200` sent, `401` token missing or wrong, `429` too many wrong tokens, `404` unknown slot or
+address, `504` the storage did not connect, `502` the command could not be sent.
+Peak shaving needs control firmware 150 or newer on the storage. The interface speaks plain HTTP, so
+use the token on a network you trust.
+
 ## What leaves your network
 
 Nothing. The bridge talks to your storage and to your browser. It reaches the internet for exactly

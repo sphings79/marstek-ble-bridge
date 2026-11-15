@@ -133,6 +133,53 @@ vollständig ist — ein abgebrochenes Update ändert also nichts. Eine Firmware
 aber nicht erreichbar wird, fällt von selbst auf die vorherige zurück. Genau das macht das
 Aktualisieren eines Boards im Keller überhaupt vertretbar.
 
+## Mehrere Speicher
+
+Eine Bridge hält bis zu **drei Speicher** gleichzeitig, jeden in einem eigenen Slot. Oben zeigt die
+Oberfläche eine Slot-Leiste: Slot wählen, einmal das Gerät dafür aussuchen, und es bleibt auch nach
+einem Neustart erhalten. Gepollt wird nur der gewählte Speicher; die anderen halten nur ihre
+Verbindung. Ein Speicher kann nur in einem Slot sitzen. Eine bestehende Einzel-Einrichtung zieht beim
+Update von selbst in Slot 1.
+
+Jede Verbindung kostet RAM auf dem ESP32. Der Diagnose-Endpunkt (`/api/diag`, Login nötig) meldet
+`heap.free`, `heap.minFree` und `heap.largestBlock`, daran sieht man, wie viel bei verbundenen Slots
+übrig bleibt.
+
+## Hausautomation (REST)
+
+Für Home Assistant und ähnliche Systeme hat die Bridge eine kleine REST-Schnittstelle, damit sich Peak
+Shaving ohne Browser schalten lässt. Sie ist aus, bis du einen API-Token anlegst (Oberfläche → *API-Token*).
+Der Token wird einmal angezeigt; die Bridge behält nur seinen Hash.
+
+```bash
+# an / aus (Leistung in Watt, 0-2500; slot ist 0, 1 oder 2, alternativ "address")
+curl -X POST http://marstek-bridge.local/api/peak-shaving \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"slot":0,"enabled":true,"power":600}'
+
+# was zuletzt gesendet wurde (der Speicher meldet diese Einstellung nicht zurück)
+curl -H "Authorization: Bearer <token>" http://marstek-bridge.local/api/peak-shaving
+```
+
+```yaml
+# Home Assistant
+rest_command:
+  peak_shaving:
+    url: "http://marstek-bridge.local/api/peak-shaving"
+    method: POST
+    headers:
+      Authorization: "Bearer <token>"
+      Content-Type: "application/json"
+    payload: '{"slot":0,"enabled":{{ enabled }},"power":{{ power }}}'
+```
+
+Hält gerade niemand den Speicher, verbindet sich die Bridge für den Befehl (bis ca. 15 s), sendet ihn
+und lässt kurz danach wieder los. Bei einem Speicher darf `slot` entfallen. Antworten: `200` gesendet,
+`401` Token fehlt oder falsch, `429` zu viele falsche Tokens, `404` unbekannter Slot oder Adresse,
+`504` der Speicher hat nicht verbunden, `502` der Befehl konnte nicht gesendet werden.
+Peak Shaving braucht auf dem Speicher Control-Firmware 150 oder neuer. Die Schnittstelle spricht
+unverschlüsseltes HTTP, den Token also nur in einem vertrauenswürdigen Netz verwenden.
+
 ## Was das Netzwerk verlässt
 
 Nichts. Die Bridge redet mit deinem Speicher und mit deinem Browser. Ins Internet geht sie für

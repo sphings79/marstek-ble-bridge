@@ -1,5 +1,6 @@
 #include "ble_central.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -28,42 +29,83 @@ static const char *TAG = "ble";
 
 #define MAX_SCAN_RESULTS 16
 
+/**
+ * Everything that belongs to one storage. A slot is a place for one connection; which device sits
+ * in it is decided by the caller, the radio code only keeps the link and what was learnt on it.
+ */
+typedef struct {
+    uint16_t conn_handle;
+    uint16_t tx_handle;
+    uint16_t rx_handle;
+    uint16_t rx_cccd_handle;
+    uint16_t tx_cccd_handle;
+
+    char name[BLE_NAME_MAX];
+    char address[BLE_ADDR_STR_LEN];
+    int8_t rssi;
+    uint16_t mtu;
+    bool subscribed;
+    bool subscribed_tx;
+    uint8_t tx_props;
+    uint8_t rx_props;
+    uint16_t cccd_written;
+    bool encrypted;
+    uint16_t last_enc_status;
+    ble_stats_t stats;
+
+    ble_addr_t target;
+    bool have_target;
+    /** A connection attempt is running or waiting its turn. */
+    bool connect_pending;
+    /** Asked for while another slot was still connecting; started when that one is done. */
+    bool queued;
+} slot_t;
+
+static slot_t s_slots[BLE_MAX_SLOTS];
+
 static ble_notify_cb_t s_on_notify;
 static ble_state_cb_t s_on_state;
 static ble_scan_cb_t s_on_scan;
 
 static bool s_host_ready = false;
 
-static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-static uint16_t s_tx_handle = 0;
-static uint16_t s_rx_handle = 0;
-static uint16_t s_rx_cccd_handle = 0;
-
-static char s_device_name[BLE_NAME_MAX];
-static char s_device_address[BLE_ADDR_STR_LEN];
-static int8_t s_rssi = 0;
-static uint16_t s_mtu = 23;
-static bool s_subscribed = false;
-static uint8_t s_tx_props = 0;
-static uint8_t s_rx_props = 0;
-static uint16_t s_cccd_written = 0;
-static uint16_t s_tx_cccd_handle = 0;
-static bool s_subscribed_tx = false;
-static bool s_encrypted = false;
-static uint16_t s_last_enc_status = 0;
-static ble_stats_t s_stats;
-
-static ble_addr_t s_target_addr;
-static bool s_have_target = false;
-static bool s_connect_pending = false;
+/** Slot whose ble_gap_connect() is outstanding, or -1. The controller starts one at a time. */
+static int s_connecting = -1;
 
 static ble_device_t s_scan_results[MAX_SCAN_RESULTS];
 static size_t s_scan_count = 0;
 
-static void set_state(ble_state_t state, const char *msg)
+static int on_gap_event_slot(struct ble_gap_event *event, void *arg);
+
+static void reset_link(slot_t *s)
+{
+    s->conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    s->tx_handle = s->rx_handle = s->rx_cccd_handle = s->tx_cccd_handle = 0;
+    s->subscribed = s->subscribed_tx = false;
+    s->encrypted = false;
+    s->mtu = 23;
+}
+
+/** The slot a callback was registered for travels as its argument. */
+static inline uint8_t slot_of(void *arg)
+{
+    return (uint8_t) (uintptr_t) arg;
+}
+
+static inline void *arg_of(uint8_t slot)
+{
+    return (void *) (uintptr_t) slot;
+}
+
+static inline bool valid_slot(uint8_t slot)
+{
+    return slot < BLE_MAX_SLOTS;
+}
+
+static void set_state(uint8_t slot, ble_state_t state, const char *msg)
 {
     if (s_on_state) {
-        s_on_state(state, msg);
+        s_on_state(slot, state, msg);
     }
 }
 
@@ -103,36 +145,38 @@ static int on_mtu_exchanged(uint16_t conn_handle, const struct ble_gatt_error *e
                             uint16_t mtu, void *arg)
 {
     (void) conn_handle;
-    (void) arg;
+    slot_t *s = &s_slots[slot_of(arg)];
 
     if (error->status == 0) {
-        s_mtu = mtu;
-        ESP_LOGI(TAG, "MTU negotiated: %u bytes", (unsigned) mtu);
+        s->mtu = mtu;
+        ESP_LOGI(TAG, "[%u] MTU negotiated: %u bytes", slot_of(arg), (unsigned) mtu);
     } else {
-        ESP_LOGW(TAG, "MTU exchange refused (%d), staying at %u", error->status, (unsigned) s_mtu);
+        ESP_LOGW(TAG, "[%u] MTU exchange refused (%d), staying at %u", slot_of(arg),
+                 error->status, (unsigned) s->mtu);
     }
 
     return 0;
 }
 
-static void announce_connected(void)
+static void announce_connected(uint8_t slot)
 {
-    ESP_LOGI(TAG, "Connected to %s (%s)", s_device_name, s_device_address);
-    set_state(BLE_STATE_CONNECTED, NULL);
+    ESP_LOGI(TAG, "[%u] Connected to %s (%s)", slot, s_slots[slot].name, s_slots[slot].address);
+    set_state(slot, BLE_STATE_CONNECTED, NULL);
 }
 
 static int on_name_read(uint16_t conn_handle, const struct ble_gatt_error *error,
                         struct ble_gatt_attr *attr, void *arg)
 {
     (void) conn_handle;
-    (void) arg;
+    const uint8_t slot = slot_of(arg);
+    slot_t *s = &s_slots[slot];
 
     if (error->status == 0 && attr && attr->om) {
         const uint16_t len = OS_MBUF_PKTLEN(attr->om);
         const uint16_t copy = len < BLE_NAME_MAX - 1 ? len : BLE_NAME_MAX - 1;
-        if (ble_hs_mbuf_to_flat(attr->om, s_device_name, copy, NULL) == 0) {
-            s_device_name[copy] = '\0';
-            ESP_LOGI(TAG, "Device reports its name as \"%s\"", s_device_name);
+        if (ble_hs_mbuf_to_flat(attr->om, s->name, copy, NULL) == 0) {
+            s->name[copy] = '\0';
+            ESP_LOGI(TAG, "[%u] Device reports its name as \"%s\"", slot, s->name);
         }
         return 0;
     }
@@ -140,10 +184,10 @@ static int on_name_read(uint16_t conn_handle, const struct ble_gatt_error *error
     // Nothing read, or the read finished: report the link either way. A device that will not tell
     // us its name still works; the name kept from the scan or the binding stands in.
     if (error->status == BLE_HS_EDONE || error->status != 0) {
-        if (s_device_name[0] == '\0') {
-            ESP_LOGW(TAG, "Device did not report a name");
+        if (s->name[0] == '\0') {
+            ESP_LOGW(TAG, "[%u] Device did not report a name", slot);
         }
-        announce_connected();
+        announce_connected(slot);
     }
 
     return 0;
@@ -154,11 +198,11 @@ static int on_tx_subscribe_done(uint16_t conn_handle, const struct ble_gatt_erro
 {
     (void) conn_handle;
     (void) attr;
-    (void) arg;
+    const uint8_t slot = slot_of(arg);
 
-    s_subscribed_tx = (error->status == 0);
-    ESP_LOGI(TAG, "Second subscription on the write characteristic: %s",
-             s_subscribed_tx ? "accepted" : "refused");
+    s_slots[slot].subscribed_tx = (error->status == 0);
+    ESP_LOGI(TAG, "[%u] Second subscription on the write characteristic: %s", slot,
+             s_slots[slot].subscribed_tx ? "accepted" : "refused");
     return 0;
 }
 
@@ -166,18 +210,18 @@ static int on_tx_descriptors(uint16_t conn_handle, const struct ble_gatt_error *
                              uint16_t chr_val_handle, const struct ble_gatt_dsc *dsc, void *arg)
 {
     (void) chr_val_handle;
-    (void) arg;
+    slot_t *s = &s_slots[slot_of(arg)];
 
-    if (error->status == 0 && dsc && s_tx_cccd_handle == 0 &&
+    if (error->status == 0 && dsc && s->tx_cccd_handle == 0 &&
         ble_uuid_u16(&dsc->uuid.u) == BLE_GATT_DSC_CLT_CFG_UUID16) {
-        s_tx_cccd_handle = dsc->handle;
+        s->tx_cccd_handle = dsc->handle;
         return 0;
     }
 
-    if (error->status == BLE_HS_EDONE && s_tx_cccd_handle != 0) {
+    if (error->status == BLE_HS_EDONE && s->tx_cccd_handle != 0) {
         static const uint8_t enable[2] = { 0x01, 0x00 };
-        ble_gattc_write_flat(conn_handle, s_tx_cccd_handle, enable, sizeof(enable),
-                             on_tx_subscribe_done, NULL);
+        ble_gattc_write_flat(conn_handle, s->tx_cccd_handle, enable, sizeof(enable),
+                             on_tx_subscribe_done, arg);
     }
 
     return 0;
@@ -187,24 +231,25 @@ static int on_subscribe_done(uint16_t conn_handle, const struct ble_gatt_error *
                              struct ble_gatt_attr *attr, void *arg)
 {
     (void) attr;
-    (void) arg;
+    const uint8_t slot = slot_of(arg);
+    slot_t *s = &s_slots[slot];
 
     if (error->status != 0) {
-        ESP_LOGE(TAG, "Subscribing to notifications failed: %d", error->status);
+        ESP_LOGE(TAG, "[%u] Subscribing to notifications failed: %d", slot, error->status);
         ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        set_state(BLE_STATE_ERROR, "Could not subscribe to notifications");
+        set_state(slot, BLE_STATE_ERROR, "Could not subscribe to notifications");
         return 0;
     }
 
-    s_subscribed = true;
+    s->subscribed = true;
 
     // The write characteristic advertises notify as well. Subscribing to both costs one more
     // descriptor write and removes the guess about which one the device actually uses.
-    ble_gattc_disc_all_dscs(conn_handle, s_tx_handle, s_rx_handle, on_tx_descriptors, NULL);
+    ble_gattc_disc_all_dscs(conn_handle, s->tx_handle, s->rx_handle, on_tx_descriptors, arg);
 
     const ble_uuid16_t name_uuid = BLE_UUID16_INIT(GAP_DEVICE_NAME_UUID);
-    if (ble_gattc_read_by_uuid(conn_handle, 1, 0xffff, &name_uuid.u, on_name_read, NULL) != 0) {
-        announce_connected();
+    if (ble_gattc_read_by_uuid(conn_handle, 1, 0xffff, &name_uuid.u, on_name_read, arg) != 0) {
+        announce_connected(slot);
     }
 
     return 0;
@@ -214,15 +259,16 @@ static int on_descriptors(uint16_t conn_handle, const struct ble_gatt_error *err
                           uint16_t chr_val_handle, const struct ble_gatt_dsc *dsc, void *arg)
 {
     (void) chr_val_handle;
-    (void) arg;
+    const uint8_t slot = slot_of(arg);
+    slot_t *s = &s_slots[slot];
 
     // Keep the FIRST one found. Discovery runs from the RX value handle upwards to the end of the
     // table, so later characteristics have configuration descriptors too - overwriting would leave
     // us enabling notifications on some unrelated characteristic, and nothing would ever arrive.
-    if (error->status == 0 && dsc && s_rx_cccd_handle == 0 &&
+    if (error->status == 0 && dsc && s->rx_cccd_handle == 0 &&
         ble_uuid_u16(&dsc->uuid.u) == BLE_GATT_DSC_CLT_CFG_UUID16) {
-        s_rx_cccd_handle = dsc->handle;
-        ESP_LOGI(TAG, "Notification descriptor at handle %u", (unsigned) dsc->handle);
+        s->rx_cccd_handle = dsc->handle;
+        ESP_LOGI(TAG, "[%u] Notification descriptor at handle %u", slot, (unsigned) dsc->handle);
         return 0;
     }
 
@@ -230,10 +276,10 @@ static int on_descriptors(uint16_t conn_handle, const struct ble_gatt_error *err
         return 0;
     }
 
-    if (s_rx_cccd_handle == 0) {
-        ESP_LOGE(TAG, "Notification descriptor not found");
+    if (s->rx_cccd_handle == 0) {
+        ESP_LOGE(TAG, "[%u] Notification descriptor not found", slot);
         ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        set_state(BLE_STATE_ERROR, "Notification descriptor not found");
+        set_state(slot, BLE_STATE_ERROR, "Notification descriptor not found");
         return 0;
     }
 
@@ -241,33 +287,34 @@ static int on_descriptors(uint16_t conn_handle, const struct ble_gatt_error *err
     // different values in the same descriptor, and a device that only indicates will accept the
     // notify bit without complaint and then never send anything - which looks exactly like a
     // working subscription that produces no data.
-    const bool can_notify = (s_rx_props & BLE_GATT_CHR_PROP_NOTIFY) != 0;
-    const bool can_indicate = (s_rx_props & BLE_GATT_CHR_PROP_INDICATE) != 0;
+    const bool can_notify = (s->rx_props & BLE_GATT_CHR_PROP_NOTIFY) != 0;
+    const bool can_indicate = (s->rx_props & BLE_GATT_CHR_PROP_INDICATE) != 0;
 
-    s_cccd_written = can_notify ? 0x0001 : (can_indicate ? 0x0002 : 0x0001);
+    s->cccd_written = can_notify ? 0x0001 : (can_indicate ? 0x0002 : 0x0001);
 
-    ESP_LOGI(TAG, "RX properties 0x%02x (notify=%d, indicate=%d), enabling 0x%04x",
-             s_rx_props, can_notify, can_indicate, s_cccd_written);
+    ESP_LOGI(TAG, "[%u] RX properties 0x%02x (notify=%d, indicate=%d), enabling 0x%04x", slot,
+             s->rx_props, can_notify, can_indicate, s->cccd_written);
 
-    const uint8_t enable[2] = { (uint8_t) (s_cccd_written & 0xff), (uint8_t) (s_cccd_written >> 8) };
-    ble_gattc_write_flat(conn_handle, s_rx_cccd_handle, enable, sizeof(enable),
-                         on_subscribe_done, NULL);
+    const uint8_t enable[2] = { (uint8_t) (s->cccd_written & 0xff), (uint8_t) (s->cccd_written >> 8) };
+    ble_gattc_write_flat(conn_handle, s->rx_cccd_handle, enable, sizeof(enable),
+                         on_subscribe_done, arg);
     return 0;
 }
 
 static int on_characteristics(uint16_t conn_handle, const struct ble_gatt_error *error,
                               const struct ble_gatt_chr *chr, void *arg)
 {
-    (void) arg;
+    const uint8_t slot = slot_of(arg);
+    slot_t *s = &s_slots[slot];
 
     if (error->status == 0 && chr) {
         const uint16_t uuid = ble_uuid_u16(&chr->uuid.u);
         if (uuid == TX_UUID) {
-            s_tx_handle = chr->val_handle;
-            s_tx_props = chr->properties;
+            s->tx_handle = chr->val_handle;
+            s->tx_props = chr->properties;
         } else if (uuid == RX_UUID) {
-            s_rx_handle = chr->val_handle;
-            s_rx_props = chr->properties;
+            s->rx_handle = chr->val_handle;
+            s->rx_props = chr->properties;
         }
         return 0;
     }
@@ -276,34 +323,34 @@ static int on_characteristics(uint16_t conn_handle, const struct ble_gatt_error 
         return 0;
     }
 
-    if (s_tx_handle == 0 || s_rx_handle == 0) {
-        ESP_LOGE(TAG, "Device does not expose the expected characteristics");
+    if (s->tx_handle == 0 || s->rx_handle == 0) {
+        ESP_LOGE(TAG, "[%u] Device does not expose the expected characteristics", slot);
         ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        set_state(BLE_STATE_ERROR, "Not a Marstek storage");
+        set_state(slot, BLE_STATE_ERROR, "Not a Marstek storage");
         return 0;
     }
 
     // Descriptors live between the value handle and the end of the service; asking from the value
     // handle upwards is enough to find this characteristic's own configuration descriptor.
-    ble_gattc_disc_all_dscs(conn_handle, s_rx_handle, 0xffff, on_descriptors, NULL);
+    ble_gattc_disc_all_dscs(conn_handle, s->rx_handle, 0xffff, on_descriptors, arg);
     return 0;
 }
 
 static int on_service(uint16_t conn_handle, const struct ble_gatt_error *error,
                       const struct ble_gatt_svc *service, void *arg)
 {
-    (void) arg;
+    const uint8_t slot = slot_of(arg);
 
     if (error->status == 0 && service) {
         ble_gattc_disc_all_chrs(conn_handle, service->start_handle, service->end_handle,
-                                on_characteristics, NULL);
+                                on_characteristics, arg);
         return 0;
     }
 
-    if (error->status == BLE_HS_EDONE && s_tx_handle == 0) {
-        ESP_LOGE(TAG, "Marstek service not found");
+    if (error->status == BLE_HS_EDONE && s_slots[slot].tx_handle == 0) {
+        ESP_LOGE(TAG, "[%u] Marstek service not found", slot);
         ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        set_state(BLE_STATE_ERROR, "Marstek service not found");
+        set_state(slot, BLE_STATE_ERROR, "Marstek service not found");
     }
 
     return 0;
@@ -350,7 +397,12 @@ static void remember_scan_result(const struct ble_gap_disc_desc *desc)
     ESP_LOGI(TAG, "Found %s (%s) at %d dBm", entry->name, entry->address, entry->rssi);
 }
 
-static int on_gap_event(struct ble_gap_event *event, void *arg)
+/**
+ * Scanning is the radio's business, not one slot's: a scan can run next to any number of healthy
+ * connections, so nothing here touches a slot's state. Reporting "idle" or "scanning" for a slot
+ * that is happily connected would tell the app the storage had gone away.
+ */
+static int on_scan_event(struct ble_gap_event *event, void *arg)
 {
     (void) arg;
 
@@ -365,41 +417,110 @@ static int on_gap_event(struct ble_gap_event *event, void *arg)
                 s_on_scan(s_scan_results, s_scan_count);
                 s_on_scan = NULL;
             }
-            // Reporting idle here would tell the app the storage had gone away, when all that
-            // finished was a scan running alongside a perfectly good connection.
-            set_state(ble_central_is_connected() ? BLE_STATE_CONNECTED : BLE_STATE_IDLE, NULL);
             break;
 
+        default:
+            break;
+    }
+
+    return 0;
+}
+
+static esp_err_t start_connect(uint8_t slot)
+{
+    slot_t *s = &s_slots[slot];
+
+    // A scan in progress would block the connection attempt.
+    ble_gap_disc_cancel();
+
+    uint8_t own_addr_type;
+    if (ble_hs_id_infer_auto(0, &own_addr_type) != 0) {
+        s->connect_pending = false;
+        set_state(slot, BLE_STATE_ERROR, "Could not choose a Bluetooth address");
+        return ESP_FAIL;
+    }
+
+    s_connecting = slot;
+    s->connect_pending = true;
+
+    int rc = ble_gap_connect(own_addr_type, &s->target, 10000, NULL, on_gap_event_slot, arg_of(slot));
+    if (rc != 0) {
+        s_connecting = -1;
+        s->connect_pending = false;
+        ESP_LOGE(TAG, "[%u] Connection could not be started: %d", slot, rc);
+
+        // The numeric reason travels to the browser too. Without it the only place it exists is a
+        // serial console, which is exactly what a bridge in a cellar does not have.
+        char msg[80];
+        snprintf(msg, sizeof(msg), "Could not start connecting (NimBLE error %d, address type %u)",
+                 rc, (unsigned) s->target.type);
+        set_state(slot, BLE_STATE_ERROR, msg);
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
+static void start_next_queued(void)
+{
+    if (s_connecting >= 0) {
+        return;
+    }
+
+    for (uint8_t i = 0; i < BLE_MAX_SLOTS; i++) {
+        if (s_slots[i].queued) {
+            s_slots[i].queued = false;
+            if (start_connect(i) == ESP_OK) {
+                return;
+            }
+            // That one failed outright and already said so; the next in line still gets its turn.
+        }
+    }
+}
+
+static int on_gap_event_slot(struct ble_gap_event *event, void *arg)
+{
+    const uint8_t slot = slot_of(arg);
+    slot_t *s = &s_slots[slot];
+
+    switch (event->type) {
         case BLE_GAP_EVENT_CONNECT:
-            s_connect_pending = false;
+            if (s_connecting == slot) {
+                s_connecting = -1;
+            }
+            s->connect_pending = false;
+
             if (event->connect.status != 0) {
-                ESP_LOGE(TAG, "Connection failed: %d", event->connect.status);
-                s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-                set_state(BLE_STATE_ERROR, "Could not connect to the storage");
+                ESP_LOGE(TAG, "[%u] Connection failed: %d", slot, event->connect.status);
+                s->conn_handle = BLE_HS_CONN_HANDLE_NONE;
+                set_state(slot, BLE_STATE_ERROR, "Could not connect to the storage");
+                start_next_queued();
                 break;
             }
 
-            s_conn_handle = event->connect.conn_handle;
-            s_tx_handle = s_rx_handle = s_rx_cccd_handle = 0;
-            s_mtu = 23;
+            reset_link(s);
+            s->conn_handle = event->connect.conn_handle;
 
-            ble_gattc_exchange_mtu(s_conn_handle, on_mtu_exchanged, NULL);
+            ble_gattc_exchange_mtu(s->conn_handle, on_mtu_exchanged, arg);
 
             // Browsers and BlueZ negotiate this transparently when a device asks for it, so a
             // storage that stays silent on an unencrypted link looks perfectly connected from
             // here. Asking costs nothing if the device does not care.
             {
-                const int sec = ble_gap_security_initiate(s_conn_handle);
+                const int sec = ble_gap_security_initiate(s->conn_handle);
                 if (sec != 0 && sec != BLE_HS_EALREADY) {
-                    ESP_LOGW(TAG, "Could not start pairing: %d", sec);
+                    ESP_LOGW(TAG, "[%u] Could not start pairing: %d", slot, sec);
                 }
             }
 
-            ESP_LOGI(TAG, "Link up, discovering services");
+            ESP_LOGI(TAG, "[%u] Link up, discovering services", slot);
             {
                 const ble_uuid16_t svc = BLE_UUID16_INIT(SVC_UUID);
-                ble_gattc_disc_svc_by_uuid(s_conn_handle, &svc.u, on_service, NULL);
+                ble_gattc_disc_svc_by_uuid(s->conn_handle, &svc.u, on_service, arg);
             }
+
+            // The controller is free again; the next slot in line can start.
+            start_next_queued();
             break;
 
         case BLE_GAP_EVENT_DISCONNECT: {
@@ -407,41 +528,42 @@ static int on_gap_event(struct ble_gap_event *event, void *arg)
             // storage regularly accepts a connection and drops it again within a second - the
             // next attempt then works - and reporting that as a plain disconnect makes pressing
             // connect look like it did nothing at all.
-            const bool was_usable = s_subscribed;
+            const bool was_usable = s->subscribed;
 
-            s_connect_pending = false;
-            ESP_LOGI(TAG, "Disconnected, reason 0x%x", event->disconnect.reason);
-            s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-            s_tx_handle = s_rx_handle = s_rx_cccd_handle = s_tx_cccd_handle = 0;
-            s_subscribed = s_subscribed_tx = false;
-            s_encrypted = false;
-            s_device_name[0] = '\0';
+            if (s_connecting == slot) {
+                s_connecting = -1;
+            }
+            s->connect_pending = false;
+            ESP_LOGI(TAG, "[%u] Disconnected, reason 0x%x", slot, event->disconnect.reason);
+            reset_link(s);
+            s->name[0] = '\0';
 
             if (was_usable) {
-                set_state(BLE_STATE_DISCONNECTED, NULL);
+                set_state(slot, BLE_STATE_DISCONNECTED, NULL);
             } else {
-                set_state(BLE_STATE_ERROR,
+                set_state(slot, BLE_STATE_ERROR,
                           "dropped_early|The storage dropped the connection before it was "
                           "usable. It usually accepts the next attempt.");
             }
+            start_next_queued();
             break;
         }
 
         case BLE_GAP_EVENT_ENC_CHANGE:
-            s_last_enc_status = event->enc_change.status;
+            s->last_enc_status = event->enc_change.status;
             {
                 struct ble_gap_conn_desc desc;
-                if (ble_gap_conn_find(s_conn_handle, &desc) == 0) {
-                    s_encrypted = desc.sec_state.encrypted;
+                if (ble_gap_conn_find(s->conn_handle, &desc) == 0) {
+                    s->encrypted = desc.sec_state.encrypted;
                 }
             }
-            ESP_LOGI(TAG, "Encryption change: status %d, encrypted=%d",
-                     event->enc_change.status, s_encrypted);
+            ESP_LOGI(TAG, "[%u] Encryption change: status %d, encrypted=%d", slot,
+                     event->enc_change.status, s->encrypted);
             break;
 
         case BLE_GAP_EVENT_MTU:
-            s_mtu = event->mtu.value;
-            ESP_LOGI(TAG, "MTU is now %u bytes", (unsigned) s_mtu);
+            s->mtu = event->mtu.value;
+            ESP_LOGI(TAG, "[%u] MTU is now %u bytes", slot, (unsigned) s->mtu);
             break;
 
         case BLE_GAP_EVENT_NOTIFY_RX: {
@@ -452,12 +574,12 @@ static int on_gap_event(struct ble_gap_event *event, void *arg)
             if (len <= sizeof(buf) &&
                 ble_hs_mbuf_to_flat(event->notify_rx.om, buf, sizeof(buf), NULL) == 0 &&
                 s_on_notify) {
-                s_stats.notifications++;
-                s_stats.notify_bytes += len;
-                ESP_LOGD(TAG, "Notification, %u bytes", (unsigned) len);
-                s_on_notify(buf, len);
+                s->stats.notifications++;
+                s->stats.notify_bytes += len;
+                ESP_LOGD(TAG, "[%u] Notification, %u bytes", slot, (unsigned) len);
+                s_on_notify(slot, buf, len);
             } else {
-                ESP_LOGW(TAG, "Dropped a %u byte notification", (unsigned) len);
+                ESP_LOGW(TAG, "[%u] Dropped a %u byte notification", slot, (unsigned) len);
             }
             break;
         }
@@ -495,6 +617,10 @@ esp_err_t ble_central_init(ble_notify_cb_t on_notify, ble_state_cb_t on_state)
 {
     s_on_notify = on_notify;
     s_on_state = on_state;
+
+    for (uint8_t i = 0; i < BLE_MAX_SLOTS; i++) {
+        reset_link(&s_slots[i]);
+    }
 
     esp_err_t err = nimble_port_init();
     if (err != ESP_OK) {
@@ -534,13 +660,10 @@ esp_err_t ble_central_scan(uint32_t seconds, ble_scan_cb_t on_result)
         .limited = 0,
     };
 
-    set_state(BLE_STATE_SCANNING, NULL);
-
-    int rc = ble_gap_disc(own_addr_type, seconds * 1000, &params, on_gap_event, NULL);
+    int rc = ble_gap_disc(own_addr_type, seconds * 1000, &params, on_scan_event, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "Scan could not be started: %d", rc);
         s_on_scan = NULL;
-        set_state(BLE_STATE_ERROR, "Scan could not be started");
         return ESP_FAIL;
     }
 
@@ -557,8 +680,13 @@ uint8_t ble_central_addr_type_for(const char *address)
     return BLE_ADDR_TYPE_UNKNOWN;
 }
 
-esp_err_t ble_central_connect(const char *address, uint8_t addr_type)
+esp_err_t ble_central_connect(uint8_t slot, const char *address, uint8_t addr_type)
 {
+    if (!valid_slot(slot)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    slot_t *s = &s_slots[slot];
+
     if (!s_host_ready) {
         ESP_LOGW(TAG, "Cannot connect: Bluetooth host not ready yet");
         return ESP_ERR_INVALID_STATE;
@@ -566,19 +694,17 @@ esp_err_t ble_central_connect(const char *address, uint8_t addr_type)
 
     // Pressing connect twice is the normal thing to do when the first press seems to do nothing.
     // A second ble_gap_connect while one is outstanding just fails, so treat the repeat as a
-    // no-op rather than turning it into an error the user has to interpret.
-    if (s_connect_pending) {
-        // Repeating the state rather than returning quietly. Pressing connect twice is the normal
-        // thing to do when the first press seems to do nothing, and answering with silence is
-        // exactly what makes it seem that way.
-        ESP_LOGI(TAG, "Connection attempt already running, repeating the state");
-        set_state(BLE_STATE_CONNECTING, NULL);
+    // no-op rather than turning it into an error the user has to interpret - and answer with the
+    // state rather than with silence, which is exactly what makes it seem like nothing happened.
+    if (s->connect_pending) {
+        ESP_LOGI(TAG, "[%u] Connection attempt already running, repeating the state", slot);
+        set_state(slot, BLE_STATE_CONNECTING, NULL);
         return ESP_OK;
     }
 
-    if (ble_central_is_connected()) {
-        ESP_LOGI(TAG, "Already connected");
-        set_state(BLE_STATE_CONNECTED, NULL);
+    if (ble_central_is_connected(slot)) {
+        ESP_LOGI(TAG, "[%u] Already connected", slot);
+        set_state(slot, BLE_STATE_CONNECTED, NULL);
         return ESP_OK;
     }
 
@@ -588,98 +714,122 @@ esp_err_t ble_central_connect(const char *address, uint8_t addr_type)
     if (addr_type == BLE_ADDR_TYPE_UNKNOWN) {
         // Nothing better to go on. Public is the common case, but say so - if the connection
         // fails, this is the first thing to suspect.
-        ESP_LOGW(TAG, "No address type known for %s, assuming public", address);
+        ESP_LOGW(TAG, "[%u] No address type known for %s, assuming public", slot, address);
         addr_type = BLE_ADDR_PUBLIC;
     }
 
-    if (!str_to_addr(address, addr_type, &s_target_addr)) {
+    if (!str_to_addr(address, addr_type, &s->target)) {
         return ESP_ERR_INVALID_ARG;
     }
-    s_have_target = true;
+    s->have_target = true;
+    strlcpy(s->address, address, sizeof(s->address));
 
-    // A scan in progress would block the connection attempt.
-    ble_gap_disc_cancel();
+    set_state(slot, BLE_STATE_CONNECTING, NULL);
 
-    uint8_t own_addr_type;
-    if (ble_hs_id_infer_auto(0, &own_addr_type) != 0) {
-        return ESP_FAIL;
+    // The controller connects to one device at a time. Another slot is mid-attempt, so this one
+    // waits its turn instead of failing - a page that reconnects all its slots in a row would
+    // otherwise lose every one but the first.
+    if (s_connecting >= 0) {
+        s->queued = true;
+        s->connect_pending = true;
+        ESP_LOGI(TAG, "[%u] Waiting for slot %d to finish connecting", slot, s_connecting);
+        return ESP_OK;
     }
 
-    strlcpy(s_device_address, address, sizeof(s_device_address));
-    set_state(BLE_STATE_CONNECTING, NULL);
-
-    s_connect_pending = true;
-
-    int rc = ble_gap_connect(own_addr_type, &s_target_addr, 10000, NULL, on_gap_event, NULL);
-    if (rc != 0) {
-        s_connect_pending = false;
-        ESP_LOGE(TAG, "Connection could not be started: %d", rc);
-
-        // The numeric reason travels to the browser too. Without it the only place it exists is a
-        // serial console, which is exactly what a bridge in a cellar does not have.
-        char msg[80];
-        snprintf(msg, sizeof(msg), "Could not start connecting (NimBLE error %d, address type %u)",
-                 rc, (unsigned) addr_type);
-        set_state(BLE_STATE_ERROR, msg);
-        return ESP_FAIL;
-    }
-
-    return ESP_OK;
+    return start_connect(slot);
 }
 
-void ble_central_disconnect(void)
+void ble_central_disconnect(uint8_t slot)
 {
-    if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
-        ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    if (!valid_slot(slot)) {
+        return;
+    }
+    slot_t *s = &s_slots[slot];
+
+    // Still waiting for its turn: just forget the request.
+    if (s->queued) {
+        s->queued = false;
+        s->connect_pending = false;
+        set_state(slot, BLE_STATE_IDLE, NULL);
+        return;
+    }
+
+    if (s->conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        ble_gap_terminate(s->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    } else if (s_connecting == slot) {
+        // Mid-attempt, so there is no link to terminate yet. The cancel ends the attempt with a
+        // connect event, which then starts whoever was waiting.
+        ble_gap_conn_cancel();
     }
 }
 
-bool ble_central_is_connected(void)
+void ble_central_disconnect_all(void)
 {
-    return s_conn_handle != BLE_HS_CONN_HANDLE_NONE && s_tx_handle != 0;
+    for (uint8_t i = 0; i < BLE_MAX_SLOTS; i++) {
+        ble_central_disconnect(i);
+    }
 }
 
-const char *ble_central_device_name(void)
+bool ble_central_is_connected(uint8_t slot)
 {
-    return s_device_name;
+    if (!valid_slot(slot)) {
+        return false;
+    }
+    return s_slots[slot].conn_handle != BLE_HS_CONN_HANDLE_NONE && s_slots[slot].tx_handle != 0;
 }
 
-const char *ble_central_device_address(void)
+const char *ble_central_device_name(uint8_t slot)
 {
-    return s_have_target ? s_device_address : "";
+    return valid_slot(slot) ? s_slots[slot].name : "";
 }
 
-uint16_t ble_central_mtu(void)
+const char *ble_central_device_address(uint8_t slot)
 {
-    return s_mtu;
+    return valid_slot(slot) && s_slots[slot].have_target ? s_slots[slot].address : "";
 }
 
-void ble_central_stats(ble_stats_t *out)
+uint16_t ble_central_mtu(uint8_t slot)
 {
-    *out = s_stats;
-    out->mtu = s_mtu;
-    out->tx_handle = s_tx_handle;
-    out->rx_handle = s_rx_handle;
-    out->cccd_handle = s_rx_cccd_handle;
-    out->tx_props = s_tx_props;
-    out->rx_props = s_rx_props;
-    out->cccd_written = s_cccd_written;
-    out->subscribed = s_subscribed;
-    out->subscribed_tx = s_subscribed_tx;
-    out->encrypted = s_encrypted;
-    out->last_enc_status = s_last_enc_status;
-    out->connected = ble_central_is_connected();
+    return valid_slot(slot) ? s_slots[slot].mtu : 23;
 }
 
-int8_t ble_central_rssi(void)
+void ble_central_stats(uint8_t slot, ble_stats_t *out)
 {
-    if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+    memset(out, 0, sizeof(*out));
+    if (!valid_slot(slot)) {
+        return;
+    }
+    const slot_t *s = &s_slots[slot];
+
+    *out = s->stats;
+    out->mtu = s->mtu;
+    out->tx_handle = s->tx_handle;
+    out->rx_handle = s->rx_handle;
+    out->cccd_handle = s->rx_cccd_handle;
+    out->tx_props = s->tx_props;
+    out->rx_props = s->rx_props;
+    out->cccd_written = s->cccd_written;
+    out->subscribed = s->subscribed;
+    out->subscribed_tx = s->subscribed_tx;
+    out->encrypted = s->encrypted;
+    out->last_enc_status = s->last_enc_status;
+    out->connected = ble_central_is_connected(slot);
+}
+
+int8_t ble_central_rssi(uint8_t slot)
+{
+    if (!valid_slot(slot)) {
+        return 0;
+    }
+    slot_t *s = &s_slots[slot];
+
+    if (s->conn_handle != BLE_HS_CONN_HANDLE_NONE) {
         int8_t rssi;
-        if (ble_gap_conn_rssi(s_conn_handle, &rssi) == 0) {
-            s_rssi = rssi;
+        if (ble_gap_conn_rssi(s->conn_handle, &rssi) == 0) {
+            s->rssi = rssi;
         }
     }
-    return s_rssi;
+    return s->rssi;
 }
 
 /** Tells us what the device did with a write, which the queueing return value does not. */
@@ -688,50 +838,54 @@ static int on_write_done(uint16_t conn_handle, const struct ble_gatt_error *erro
 {
     (void) conn_handle;
     (void) attr;
-    (void) arg;
+    const uint8_t slot = slot_of(arg);
+    slot_t *s = &s_slots[slot];
 
     if (error->status == 0) {
-        s_stats.write_acks++;
+        s->stats.write_acks++;
     } else {
-        s_stats.write_rejects++;
-        s_stats.last_write_error = error->status;
-        ESP_LOGW(TAG, "Device rejected a write: status %d", error->status);
+        s->stats.write_rejects++;
+        s->stats.last_write_error = error->status;
+        ESP_LOGW(TAG, "[%u] Device rejected a write: status %d", slot, error->status);
     }
 
     return 0;
 }
 
-esp_err_t ble_central_write(const uint8_t *data, size_t len, bool with_response)
+esp_err_t ble_central_write(uint8_t slot, const uint8_t *data, size_t len, bool with_response)
 {
-    if (!ble_central_is_connected()) {
+    if (!ble_central_is_connected(slot)) {
         return ESP_ERR_INVALID_STATE;
     }
+    slot_t *s = &s_slots[slot];
 
     // Ask for an acknowledged write only if the characteristic actually offers one. Browsers pick
     // this way too - Chrome's writeValue() looks at the properties and silently uses the
     // unacknowledged form when that is all there is. Sending a write request to a characteristic
     // that only accepts write-without-response gets it refused, and without a callback that
     // refusal is invisible: the queueing call still returns success.
-    const bool supports_ack = (s_tx_props & BLE_GATT_CHR_PROP_WRITE) != 0;
-    const bool supports_no_ack = (s_tx_props & BLE_GATT_CHR_PROP_WRITE_NO_RSP) != 0;
+    const bool supports_ack = (s->tx_props & BLE_GATT_CHR_PROP_WRITE) != 0;
+    const bool supports_no_ack = (s->tx_props & BLE_GATT_CHR_PROP_WRITE_NO_RSP) != 0;
     const bool acknowledged = with_response ? supports_ack : (supports_no_ack ? false : supports_ack);
 
     int rc = acknowledged
-        ? ble_gattc_write_flat(s_conn_handle, s_tx_handle, data, len, on_write_done, NULL)
-        : ble_gattc_write_no_rsp_flat(s_conn_handle, s_tx_handle, data, len);
+        ? ble_gattc_write_flat(s->conn_handle, s->tx_handle, data, len, on_write_done, arg_of(slot))
+        : ble_gattc_write_no_rsp_flat(s->conn_handle, s->tx_handle, data, len);
 
     if (rc != 0) {
-        s_stats.writes_failed++;
-        ESP_LOGW(TAG, "Write of %u bytes failed: %d", (unsigned) len, rc);
+        s->stats.writes_failed++;
+        ESP_LOGW(TAG, "[%u] Write of %u bytes failed: %d", slot, (unsigned) len, rc);
         return ESP_FAIL;
     }
 
-    s_stats.writes_ok++;
+    s->stats.writes_ok++;
     return ESP_OK;
 }
 
 /** Remember the name a scan saw, so the app can identify the model without a round trip. */
-void ble_central_set_device_name(const char *name)
+void ble_central_set_device_name(uint8_t slot, const char *name)
 {
-    strlcpy(s_device_name, name, sizeof(s_device_name));
+    if (valid_slot(slot)) {
+        strlcpy(s_slots[slot].name, name, sizeof(s_slots[slot].name));
+    }
 }

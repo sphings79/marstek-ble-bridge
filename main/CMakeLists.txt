@@ -9,6 +9,7 @@ idf_component_register(
         "web_server.c"
         "ble_central.c"
         "ws_bridge.c"
+        "rest_api.c"
         "status_led.c"
         "ota_update.c"
         "boot_guard.c"
