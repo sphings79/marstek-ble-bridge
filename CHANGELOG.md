@@ -6,6 +6,13 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.12 — 2026-11-15
+**Beta.** Diagnostic build; bridge and web interface only work together.
+- `/api/log` records more of what happens on a link: the connection parameters at link-up and
+  whenever they change, every Bluetooth event the bridge does not handle itself (by its number), the
+  result of both notification subscriptions, and the handle each reply arrives on.
+  Meant to find out why a Venus D stops answering about 30 s after it connects.
+
 ## v1.4.0-beta.11 — 2026-11-15
 **Beta.** Web interface only; the firmware is unchanged from v1.4.0-beta.10.
 - **Fix: the update card did not offer the newest beta.** GitHub lists releases by tag name as text,

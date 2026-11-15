@@ -129,6 +129,9 @@ static const char *event_name(uint8_t type)
         case BLE_EV_KEEPALIVE:       return "keepalive";
         case BLE_EV_KEEPALIVE_MISS:  return "keepalive-miss";
         case BLE_EV_CYCLE:           return "cycle";
+        case BLE_EV_GAP_OTHER:       return "gap-event";
+        case BLE_EV_CONN_PARAMS:     return "conn-params";
+        case BLE_EV_SUBSCRIBE:       return "subscribe";
         default:                     return "?";
     }
 }
@@ -156,10 +159,28 @@ void ble_central_log_dump(ble_log_line_cb_t cb, void *ctx)
 
         switch (e->type) {
             case BLE_EV_WRITE:
-            case BLE_EV_NOTIFY:
                 snprintf(line, sizeof(line), "%9.3f s  slot %u  %-14s %u bytes, cmd 0x%02x%s\n",
                          e->ms / 1000.0, (unsigned) e->slot, event_name(e->type), (unsigned) e->a,
                          (unsigned) (e->b & 0xff), (e->b & 0x8000) ? " (FAILED)" : "");
+                break;
+            case BLE_EV_NOTIFY:
+                snprintf(line, sizeof(line), "%9.3f s  slot %u  %-14s %u bytes, cmd 0x%02x, handle %u\n",
+                         e->ms / 1000.0, (unsigned) e->slot, event_name(e->type), (unsigned) e->a,
+                         (unsigned) (e->b & 0xff), (unsigned) (e->b >> 8));
+                break;
+            case BLE_EV_CONN_PARAMS:
+                snprintf(line, sizeof(line), "%9.3f s  slot %u  %-14s interval %.2f ms, supervision %u ms\n",
+                         e->ms / 1000.0, (unsigned) e->slot, event_name(e->type), e->a * 1.25,
+                         (unsigned) e->b * 10);
+                break;
+            case BLE_EV_SUBSCRIBE:
+                snprintf(line, sizeof(line), "%9.3f s  slot %u  %-14s %s characteristic, status %u\n",
+                         e->ms / 1000.0, (unsigned) e->slot, event_name(e->type),
+                         e->a ? "write" : "notify", (unsigned) e->b);
+                break;
+            case BLE_EV_GAP_OTHER:
+                snprintf(line, sizeof(line), "%9.3f s  slot %u  %-14s type %u\n",
+                         e->ms / 1000.0, (unsigned) e->slot, event_name(e->type), (unsigned) e->a);
                 break;
             case BLE_EV_DISCONNECT:
                 snprintf(line, sizeof(line), "%9.3f s  slot %u  %-14s reason 0x%x\n",
@@ -171,6 +192,14 @@ void ble_central_log_dump(ble_log_line_cb_t cb, void *ctx)
                          (unsigned) e->b);
         }
         cb(line, ctx);
+    }
+}
+
+static void log_conn_params(uint8_t slot, uint16_t conn_handle)
+{
+    struct ble_gap_conn_desc desc;
+    if (ble_gap_conn_find(conn_handle, &desc) == 0) {
+        ble_central_log(BLE_EV_CONN_PARAMS, slot, desc.conn_itvl, desc.supervision_timeout);
     }
 }
 
@@ -301,6 +330,7 @@ static int on_tx_subscribe_done(uint16_t conn_handle, const struct ble_gatt_erro
     const uint8_t slot = slot_of(arg);
 
     s_slots[slot].subscribed_tx = (error->status == 0);
+    ble_central_log(BLE_EV_SUBSCRIBE, slot, 1, (uint16_t) error->status);
     ESP_LOGI(TAG, "[%u] Second subscription on the write characteristic: %s", slot,
              s_slots[slot].subscribed_tx ? "accepted" : "refused");
     return 0;
@@ -342,6 +372,7 @@ static int on_subscribe_done(uint16_t conn_handle, const struct ble_gatt_error *
     }
 
     s->subscribed = true;
+    ble_central_log(BLE_EV_SUBSCRIBE, slot, 0, 0);
 
     // The write characteristic advertises notify as well. Subscribing to both costs one more
     // descriptor write and removes the guess about which one the device actually uses.
@@ -604,6 +635,7 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg)
             s->conn_handle = event->connect.conn_handle;
             s->last_notify_us = esp_timer_get_time();
             ble_central_log(BLE_EV_LINK_UP, slot, s->conn_handle, 0);
+            log_conn_params(slot, s->conn_handle);
 
             ble_gattc_exchange_mtu(s->conn_handle, on_mtu_exchanged, arg);
 
@@ -677,7 +709,8 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg)
                 ble_hs_mbuf_to_flat(event->notify_rx.om, buf, sizeof(buf), NULL) == 0 &&
                 s_on_notify) {
                 s->last_notify_us = esp_timer_get_time();
-                ble_central_log(BLE_EV_NOTIFY, slot, len, len > 3 ? buf[3] : 0);
+                ble_central_log(BLE_EV_NOTIFY, slot, len,
+                                (uint16_t) ((len > 3 ? buf[3] : 0) | ((event->notify_rx.attr_handle & 0xff) << 8)));
                 s->stats.notifications++;
                 s->stats.notify_bytes += len;
                 ESP_LOGD(TAG, "[%u] Notification, %u bytes", slot, (unsigned) len);
@@ -688,7 +721,16 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg)
             break;
         }
 
+        case BLE_GAP_EVENT_CONN_UPDATE:
+            ble_central_log(BLE_EV_GAP_OTHER, slot, (uint16_t) event->type, (uint16_t) event->conn_update.status);
+            log_conn_params(slot, s->conn_handle);
+            break;
+
         default:
+            // Everything not handled above is worth a line: the silence of a storage is a question
+            // about what happened on the link, and a parameter or PHY change is the kind of thing
+            // that would be the answer.
+            ble_central_log(BLE_EV_GAP_OTHER, slot, (uint16_t) event->type, 0);
             break;
     }
 

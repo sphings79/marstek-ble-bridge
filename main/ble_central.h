@@ -160,6 +160,9 @@ typedef enum {
     BLE_EV_KEEPALIVE,
     BLE_EV_KEEPALIVE_MISS,
     BLE_EV_CYCLE,
+    BLE_EV_GAP_OTHER,
+    BLE_EV_CONN_PARAMS,
+    BLE_EV_SUBSCRIBE,
 } ble_event_t;
 
 void ble_central_log(ble_event_t type, uint8_t slot, uint16_t a, uint16_t b);
