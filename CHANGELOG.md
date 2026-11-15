@@ -6,6 +6,15 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.18 — 2026-11-16
+**Beta.** Diagnostic build; bridge and web interface only work together.
+- `/api/experiment` bit 16 (`set=16`): the bridge replays the vendor app's whole session from a Bluetooth
+  capture of it - every command, in the same order and with the same timing, then the state and the
+  setting every 3 s - and drops the commands of the web app, so that only the app's traffic reaches the
+  storage. The capture shows what the app really sends: `0x03` and `0x0a` as 6-byte frames with payload
+  `01`, no `0x04`, and `0x42` only once. If the Venus D keeps answering this way, the cause is what this
+  bridge and the web app send; if it still stops after about 28 s, it is the link. Values go up to 31.
+
 ## v1.4.0-beta.17 — 2026-11-16
 **Beta.** Diagnostic build; bridge and web interface only work together.
 - `/api/experiment` has a new bit, 8: the bridge sends the vendor app's steady polling itself, `0x03` and

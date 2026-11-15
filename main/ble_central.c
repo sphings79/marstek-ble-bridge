@@ -90,6 +90,7 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg);
 #define EXP_MTU_512 2
 #define EXP_APP_READS 4
 #define EXP_APP_HEARTBEAT 8
+#define EXP_APP_REPLAY 16
 
 static uint8_t s_experiment = 0;
 static bool s_random_address_ready = false;
@@ -423,6 +424,73 @@ static void start_heartbeat(uint8_t slot)
     esp_timer_start_once(s_beat_timer[slot], 1000 * 1000);
 }
 
+/**
+ * The vendor app's whole session, replayed. The sequence and the timing are those of the longest
+ * connection in a capture of the app (every write of it): state and setting first, then modem
+ * version, VID, the state again, VID, the setting, vid/xid, and from there the state and the setting
+ * alternately every 3 s. Delays are from the previous frame, starting at the moment the bridge is
+ * ready, which is about when the app wrote its notification descriptor.
+ */
+typedef struct {
+    uint16_t delay_ms;
+    uint8_t frame;   /* index into s_replay_frames */
+} replay_step_t;
+
+static const uint8_t s_replay_frames[][8] = {
+    { 0x73, 0x06, 0x23, 0x03, 0x01, 0x54, 0x00, 0x00 },   /* 0: state */
+    { 0x73, 0x06, 0x23, 0x0a, 0x01, 0x5d, 0x00, 0x00 },   /* 1: setting */
+    { 0x73, 0x08, 0x23, 0x11, 0x0a, 0x0b, 0x0c, 0x44 },   /* 2: modem version */
+    { 0x73, 0x07, 0x23, 0x24, 0x0a, 0x0b, 0x72, 0x00 },   /* 3: VID */
+    { 0x73, 0x06, 0x23, 0x51, 0x0c, 0x0b, 0x00, 0x00 },   /* 4: vid/xid */
+};
+static const uint8_t s_replay_len[] = { 6, 6, 8, 7, 6 };
+
+static const replay_step_t s_replay_steps[] = {
+    { 650, 0 }, { 490, 1 }, { 1010, 2 }, { 2000, 0 }, { 1610, 3 }, { 1390, 1 },
+    { 2020, 4 }, { 980, 0 }, { 3000, 1 },
+};
+
+static esp_timer_handle_t s_replay_timer[BLE_MAX_SLOTS];
+static uint16_t s_replay_pos[BLE_MAX_SLOTS];
+
+static void replay_step(void *arg)
+{
+    const uint8_t slot = slot_of(arg);
+    if (!(s_experiment & EXP_APP_REPLAY) || !ble_central_is_ready(slot)) {
+        return;
+    }
+
+    const size_t steps = sizeof(s_replay_steps) / sizeof(s_replay_steps[0]);
+    const uint16_t pos = s_replay_pos[slot];
+    uint8_t frame;
+    uint32_t next_ms;
+
+    if (pos < steps) {
+        frame = s_replay_steps[pos].frame;
+    } else {
+        // Steady state: the state and the setting in turn, every 3 s, the state first.
+        frame = (uint8_t) ((pos - steps) % 2 == 0 ? 0 : 1);
+    }
+    ble_central_write(slot, s_replay_frames[frame], s_replay_len[frame], false);
+
+    s_replay_pos[slot] = pos + 1;
+    next_ms = (pos + 1 < steps) ? s_replay_steps[pos + 1].delay_ms : 3000;
+    esp_timer_start_once(s_replay_timer[slot], (uint64_t) next_ms * 1000);
+}
+
+static void start_replay(uint8_t slot)
+{
+    if (!s_replay_timer[slot]) {
+        const esp_timer_create_args_t args = { .callback = &replay_step, .arg = arg_of(slot), .name = "ble_replay" };
+        if (esp_timer_create(&args, &s_replay_timer[slot]) != ESP_OK) {
+            return;
+        }
+    }
+    s_replay_pos[slot] = 0;
+    esp_timer_stop(s_replay_timer[slot]);
+    esp_timer_start_once(s_replay_timer[slot], (uint64_t) s_replay_steps[0].delay_ms * 1000);
+}
+
 static void start_app_reads(uint8_t slot)
 {
     if (!s_reads_timer[slot]) {
@@ -441,11 +509,16 @@ static void announce_connected(uint8_t slot)
     ESP_LOGI(TAG, "[%u] Connected to %s (%s)", slot, s_slots[slot].name, s_slots[slot].address);
     s_slots[slot].ready = true;
     ble_central_log(BLE_EV_READY, slot, 0, 0);
-    if (s_experiment & EXP_APP_READS) {
-        start_app_reads(slot);
-    }
-    if (s_experiment & EXP_APP_HEARTBEAT) {
-        start_heartbeat(slot);
+    if (s_experiment & EXP_APP_REPLAY) {
+        // The whole session replaces the smaller experiments.
+        start_replay(slot);
+    } else {
+        if (s_experiment & EXP_APP_READS) {
+            start_app_reads(slot);
+        }
+        if (s_experiment & EXP_APP_HEARTBEAT) {
+            start_heartbeat(slot);
+        }
     }
     set_state(slot, BLE_STATE_CONNECTED, NULL);
 }
