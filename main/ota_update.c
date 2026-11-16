@@ -272,12 +272,14 @@ static esp_err_t version_get(httpd_req_t *req)
     char web[32];
     web_version(web, sizeof(web));
 
-    char body[320];
+    // The chip, so the update card picks the image built for it: an ESP32 and an ESP32-S3 do not
+    // run each other's firmware.
+    char body[352];
     snprintf(body, sizeof(body),
              "{\"version\":\"%s\",\"built\":\"%s %s\",\"idf\":\"%s\",\"slot\":\"%s\","
-             "\"web\":\"%s\"}",
+             "\"web\":\"%s\",\"chip\":\"%s\"}",
              app->version, app->date, app->time, app->idf_ver,
-             running ? running->label : "?", web);
+             running ? running->label : "?", web, CONFIG_IDF_TARGET);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");

@@ -16,7 +16,8 @@ tools/release.sh 1.3.19
 Before running it, write the `## v1.3.19` section in `CHANGELOG.md` and commit it on `master`. Control
 must be on `master`, clean and equal to `origin/master`. The script then:
 
-1. tags the release, bundles the Control build (`sync-web.sh`) and builds the firmware,
+1. tags the release, bundles the Control build (`sync-web.sh`) and builds the firmware for the ESP32 and the
+   ESP32-S3 (`build-s3/`, configured by `sdkconfig.s3`),
 2. copies the images, bumps `docs/manifest.json` and records the Control commit in
    `docs/firmware/build-info.txt`, then commits,
 3. asks, then pushes `master` and the tag and creates the GitHub release with both images,

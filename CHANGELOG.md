@@ -6,6 +6,15 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.3.21 — 2026-11-16
+- **ESP32-S3 in the web installer.** The installer now offers an image for the ESP32-S3 as well as for the
+  classic ESP32 and picks the right one by itself. The release carries it as
+  `marstek-ble-bridge-esp32s3.bin`; the web image is shared. The firmware reports its chip, and the update
+  card installs the image that fits it. Boards with USB through the chip's own port (no separate USB-serial
+  chip) can be flashed from the browser, but the WiFi setup over the cable (Improv) needs a UART: join the
+  `Marstek-Bridge-XXXX` access point instead.
+- Otherwise the firmware is unchanged from v1.3.20.
+
 ## v1.3.20 — 2026-11-16
 - **Fix: the Venus D no longer goes silent about 28 s after connecting.** Right after connecting, the
   Venus D sends an "Exchange MTU" request of its own. The firmware was built as a pure Bluetooth
