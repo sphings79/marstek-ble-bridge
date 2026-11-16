@@ -269,6 +269,27 @@ other way round. Not yet tested against real storages in several slots.
   If nothing holds the storage, the bridge connects for the command and releases it again shortly
   after. See the README.
 - `/api/diag` now lists every slot and reports the free heap, to judge how many connections fit.
+## v1.3.21 — 2026-11-16
+- **ESP32-S3 in the web installer.** The installer now offers an image for the ESP32-S3 as well as for the
+  classic ESP32 and picks the right one by itself. The release carries it as
+  `marstek-ble-bridge-esp32s3.bin`; the web image is shared. The firmware reports its chip, and the update
+  card installs the image that fits it. Boards with USB through the chip's own port (no separate USB-serial
+  chip) can be flashed from the browser, but the WiFi setup over the cable (Improv) needs a UART: join the
+  `Marstek-Bridge-XXXX` access point instead.
+- Otherwise the firmware is unchanged from v1.3.20.
+
+## v1.3.20 — 2026-11-16
+- **Fix: the Venus D no longer goes silent about 28 s after connecting.** Right after connecting, the
+  Venus D sends an "Exchange MTU" request of its own. The firmware was built as a pure Bluetooth
+  central without the GATT server, and NimBLE only handles that request when the server is built in:
+  the request was dropped unanswered, and an unanswered Bluetooth request times out after 30 s, after
+  which the link carries nothing more - the device stopped answering and stopped notifying while the
+  connection itself stayed up. The firmware is now built with the GATT server (no service is registered,
+  nothing advertises; about 16 KB larger).
+- The bridge no longer starts pairing after connecting. The vendor app never pairs with a storage, and
+  the Venus D does not answer a pairing request.
+  (The web interface changes only in that the message of an earlier failed connection attempt no longer
+  stays on screen once a later attempt has connected.)
 
 ## v1.3.19 — 2026-11-15
 - The version is shown in the footer and at the bottom of the mobile menu.

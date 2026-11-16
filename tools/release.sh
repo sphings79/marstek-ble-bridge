@@ -5,7 +5,7 @@
 #
 # Prerequisites: CHANGELOG.md already has a "## v<version>" section and is committed on master;
 # Control is on master, clean and equal to origin/master. The steps:
-#   1. tag, bundle the Control build (sync-web.sh), build the firmware
+#   1. tag, bundle the Control build (sync-web.sh), build the firmware for the ESP32 and the ESP32-S3
 #   2. copy the images, bump manifest.json, record the Control commit in docs/firmware/build-info.txt, commit
 #   3. ask, then push master + tag and create the GitHub release
 #   4. ask, then back up and replace the hosted app (only if HOSTING_* is configured)
@@ -45,10 +45,15 @@ trap 'echo "Build failed - removing the local tag $TAG"; git tag -d "$TAG" >/dev
 tools/sync-web.sh "$CONTROL_DIR" >/dev/null
 (. "$IDF_EXPORT" >/dev/null 2>&1; idf.py build >/dev/null)
 strings -a build/marstek-ble-bridge.bin | grep -x "$TAG" >/dev/null || die "Firmware image does not carry version $TAG."
+# The same firmware for the ESP32-S3. Its own build directory and configuration; the web image is shared.
+(. "$IDF_EXPORT" >/dev/null 2>&1; idf.py -B build-s3 -D SDKCONFIG=sdkconfig.s3 build >/dev/null)
+strings -a build-s3/marstek-ble-bridge.bin | grep -x "$TAG" >/dev/null || die "ESP32-S3 image does not carry version $TAG."
 trap - ERR
 
 # --- 2. Images, manifest, build info ---
 cp build/marstek-ble-bridge.bin build/web.bin docs/firmware/
+cp build-s3/marstek-ble-bridge.bin docs/firmware/marstek-ble-bridge-esp32s3.bin
+cp build-s3/bootloader/bootloader.bin docs/firmware/bootloader-esp32s3.bin
 sed -i.bak -E "s/\"version\": \"[0-9.]+\"/\"version\": \"$VERSION\"/" docs/manifest.json && rm docs/manifest.json.bak
 printf 'version=%s\ncontrol_commit=%s\n' "$TAG" "$CONTROL_COMMIT" > docs/firmware/build-info.txt
 git add docs
@@ -64,7 +69,7 @@ notes=$(mktemp)
     echo
     awk -v t="## $TAG " 'index($0,t)==1{f=1;next} /^## v/{f=0} f' CHANGELOG.md
 } > "$notes"
-gh release create "$TAG" build/marstek-ble-bridge.bin build/web.bin --title "$TAG" --notes-file "$notes"
+gh release create "$TAG" build/marstek-ble-bridge.bin docs/firmware/marstek-ble-bridge-esp32s3.bin build/web.bin --title "$TAG" --notes-file "$notes"
 rm -f "$notes"
 
 # --- 4. Hosted app ---

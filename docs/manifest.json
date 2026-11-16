@@ -1,6 +1,6 @@
 {
   "name": "Marstek BLE Bridge",
-  "version": "1.3.19",
+  "version": "1.3.21",
   "new_install_prompt_erase": true,
   "builds": [
     {
@@ -21,6 +21,32 @@
         },
         {
           "path": "firmware/marstek-ble-bridge.bin",
+          "offset": 131072
+        },
+        {
+          "path": "firmware/web.bin",
+          "offset": 3276800
+        }
+      ]
+    },
+    {
+      "chipFamily": "ESP32-S3",
+      "improv": true,
+      "parts": [
+        {
+          "path": "firmware/bootloader-esp32s3.bin",
+          "offset": 0
+        },
+        {
+          "path": "firmware/partition-table.bin",
+          "offset": 32768
+        },
+        {
+          "path": "firmware/ota_data_initial.bin",
+          "offset": 61440
+        },
+        {
+          "path": "firmware/marstek-ble-bridge-esp32s3.bin",
           "offset": 131072
         },
         {
