@@ -6,6 +6,17 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.24 — 2026-11-16
+**Beta.** Bridge and web interface only work together.
+- **Venus D: a new connection as soon as it falls silent.** The log of beta.23 shows what the mute is:
+  the Venus D stops answering about 26-29 s after connecting, and none of the wake-up steps helps
+  (descriptor written again, notifications off and on, connection update). A read of the module's third
+  characteristic 0xFF06 is still answered with "not permitted" (status 258) during the mute, so the
+  module's Bluetooth stack is alive and the data path behind it is dead. A new connection always
+  works at once. So the ladder is gone: a request unanswered for 3 s now drops the link, and the usual
+  reconnect brings it back within a few seconds. The log shows `mute-recovery step 6 (reconnect)`.
+- The data path through REST works the same way: it connects on demand and is not affected.
+
 ## v1.4.0-beta.23 — 2026-11-16
 **Beta.** Diagnostic build; bridge and web interface only work together.
 - **Fix: the mute recovery of beta.22 never started.** It looked for "VNSD" in the name the device

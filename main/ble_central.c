@@ -76,10 +76,9 @@ typedef struct {
     uint8_t aux_props;
     int64_t aux_read_at_us;
     /** Mute recovery (see the supervisor at the end of the file). */
-    uint8_t mute_step;
+    /** Set once the link was dropped for being mute; cleared with the link. */
+    bool mute_handled;
     bool supervised;
-    int64_t mute_next_us;
-    int64_t mute_probe_us;
 } slot_t;
 
 static slot_t s_slots[BLE_MAX_SLOTS];
@@ -273,7 +272,7 @@ static void reset_link(slot_t *s)
     s->aux_handle = 0;
     s->aux_props = 0;
     s->aux_read_at_us = 0;
-    s->mute_step = 0;
+    s->mute_handled = false;
     s->subscribed = s->subscribed_tx = false;
     s->encrypted = false;
     s->ready = false;
@@ -1435,13 +1434,10 @@ void ble_central_set_device_name(uint8_t slot, const char *name)
 /*
  * The Venus D stops answering about 28 s after the link came up while the link itself stays up.
  * Neither the capture of the vendor app nor the firmware explains it, so this does not try to
- * prevent it: it notices a request that stays unanswered and then works through everything that
- * could wake the device, one step at a time, probing after each. The log says which step (if any)
- * got an answer, and whatever is left ends with a fresh connection.
+ * prevent it: a request that stays unanswered ends the link, and the fresh one that follows works.
  */
 
-#define MUTE_DETECT_US   (4 * 1000 * 1000)
-#define MUTE_STEP_US     (3 * 1000 * 1000)
+#define MUTE_DETECT_US   (3 * 1000 * 1000)
 #define MUTE_LAST_STEP   6
 
 static esp_timer_handle_t s_super_timer;
@@ -1489,53 +1485,11 @@ static void read_aux(uint8_t slot)
     }
 }
 
-static int on_cccd_off_done(uint16_t conn_handle, const struct ble_gatt_error *error,
-                            struct ble_gatt_attr *attr, void *arg)
-{
-    (void) attr;
-    (void) error;
-    const uint8_t slot = slot_of(arg);
-    const uint8_t on[2] = { 0x01, 0x00 };
-    if (s_slots[slot].rx_cccd_handle) {
-        ble_gattc_write_flat(conn_handle, s_slots[slot].rx_cccd_handle, on, sizeof(on), NULL, NULL);
-    }
-    return 0;
-}
-
-static void mute_action(uint8_t slot, uint8_t step)
-{
-    slot_t *s = &s_slots[slot];
-    const uint8_t on[2] = { 0x01, 0x00 };
-    const uint8_t off[2] = { 0x00, 0x00 };
-
-    switch (step) {
-        case 2:
-            if (s->rx_cccd_handle) {
-                ble_gattc_write_flat(s->conn_handle, s->rx_cccd_handle, on, sizeof(on), NULL, NULL);
-            }
-            break;
-        case 3:
-            if (s->rx_cccd_handle) {
-                ble_gattc_write_flat(s->conn_handle, s->rx_cccd_handle, off, sizeof(off),
-                                     on_cccd_off_done, arg_of(slot));
-            }
-            break;
-        case 4:
-            request_params(s->conn_handle, 0x0018);
-            break;
-        case 5:
-            read_aux(slot);
-            break;
-        default:
-            break;
-    }
-}
-
 static void supervise_slot(uint8_t slot, int64_t now)
 {
     slot_t *s = &s_slots[slot];
     if (!is_venus_d(s) || !ble_central_is_ready(slot)) {
-        s->mute_step = 0;
+        s->mute_handled = false;
         s->supervised = false;
         return;
     }
@@ -1550,55 +1504,20 @@ static void supervise_slot(uint8_t slot, int64_t now)
         read_aux(slot);
     }
 
-    if (s->mute_step == 0) {
-        // A request went out and nothing has come back for a while, after the link had been
-        // answering. Writes that never get a reply by design are caught by the probe below.
-        if (s->last_write_us > s->last_notify_us && now - s->last_write_us > MUTE_DETECT_US) {
-            s->mute_step = 1;
-            ble_central_log(BLE_EV_RECOVERY, slot, 0, 0);
-            read_aux(slot);
-            s->mute_next_us = now;
-        } else {
-            return;
-        }
-    }
-
-    if (now < s->mute_next_us) {
-        return;
-    }
-
-    // Did the last probe get an answer?
-    if (s->mute_probe_us && s->last_notify_us >= s->mute_probe_us) {
-        ble_central_log(BLE_EV_RECOVERY, slot, (uint16_t) (s->mute_step - 1 > 0 ? s->mute_step - 1 : 1), 1);
-        s->mute_step = 0;
-        s->mute_probe_us = 0;
-        return;
-    }
-
-    if (s->mute_step > MUTE_LAST_STEP) {
-        s->mute_step = 0;
-        return;
-    }
-
-    const uint8_t step = s->mute_step++;
-    ble_central_log(BLE_EV_RECOVERY, slot, step, 0);
-
-    if (step == MUTE_LAST_STEP) {
-        ble_central_log(BLE_EV_RECOVERY, slot, step, 2);
-        s->mute_probe_us = 0;
-        s->mute_step = 0;
+    // A request went out and nothing has come back for a while. The ladder of beta.22/23 tried to
+    // wake the device first (notification descriptor again, off and on, connection update, a read of
+    // 0xFF06) and none of it helped, while a new connection always does and is ready again within
+    // a second. So that is what happens now, at once.
+    if (!s->mute_handled && s->last_write_us > s->last_notify_us && now - s->last_write_us > MUTE_DETECT_US) {
+        s->mute_handled = true;
+        ble_central_log(BLE_EV_RECOVERY, slot, 0, 0);
+        // One read as evidence: an error answer (status 258, "not permitted") proves the module's
+        // own Bluetooth stack is alive and only the data path to the storage's controller is dead.
+        read_aux(slot);
+        ble_central_log(BLE_EV_RECOVERY, slot, MUTE_LAST_STEP, 0);
+        ble_central_log(BLE_EV_RECOVERY, slot, MUTE_LAST_STEP, 2);
         ble_gap_terminate(s->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        return;
     }
-
-    mute_action(slot, step);
-
-    // The probe is the same state request the vendor app sends: it is answered at once on a link
-    // that works.
-    static const uint8_t probe[6] = { 0x73, 0x06, 0x23, 0x03, 0x01, 0x54 };
-    s->mute_probe_us = esp_timer_get_time();
-    ble_central_write_quiet(slot, probe, sizeof(probe), false);
-    s->mute_next_us = now + MUTE_STEP_US;
 }
 
 static void supervisor_tick(void *arg)
