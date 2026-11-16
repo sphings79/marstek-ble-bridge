@@ -6,6 +6,17 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.27 — 2026-11-16
+**Beta.** Bridge and web interface only work together. Flash firmware and web image.
+- **Cleanup after the Venus D fix.** The Venus D stays connected: the cause was the missing GATT server
+  (see beta.26), which stays. Everything that was built to hunt for it is gone: `/api/experiment` with
+  all its switches (random address, MTU 512, replay of the vendor app's session, 6-byte polling, small
+  data length), the planned reconnect, the silence check with its reconnect, the read of the module's
+  third characteristic and the log entries that went with them.
+- Detection of a lost connection is unchanged: a link that ends is reported at once, a kept link that
+  stops answering is cycled by the keepalive, and a link nobody used for 45 s is checked before it is
+  trusted again. `/api/log`, `/api/diag` and `/api/status` stay for testing from Home Assistant.
+
 ## v1.4.0-beta.26 — 2026-11-16
 **Beta.** Bridge and web interface only work together. Flash firmware and web image.
 - **Likely cause of the Venus D going silent after ~28 s found and fixed.** The Venus D sends an ATT

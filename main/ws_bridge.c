@@ -937,11 +937,6 @@ static esp_err_t cmd_enqueue(uint8_t slot, const uint8_t *data, size_t len)
     if (!ble_central_is_connected(slot)) {
         return ESP_ERR_INVALID_STATE;
     }
-    // Debug replay of the vendor app's session (see ble_central.h, bit 16): the bridge is the only
-    // one talking to the storage then, so what the web app asks for is dropped.
-    if (ble_central_experiment() & 16) {
-        return ESP_OK;
-    }
     // Longer than any command seen: send it as it is rather than refuse it.
     if (len > CMD_MAX_LEN) {
         return ble_central_write(slot, data, len, true);

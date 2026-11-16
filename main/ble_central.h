@@ -163,8 +163,6 @@ typedef enum {
     BLE_EV_GAP_OTHER,
     BLE_EV_CONN_PARAMS,
     BLE_EV_SUBSCRIBE,
-    BLE_EV_RECOVERY,
-    BLE_EV_AUX,
 } ble_event_t;
 
 void ble_central_log(ble_event_t type, uint8_t slot, uint16_t a, uint16_t b);
@@ -173,22 +171,3 @@ void ble_central_log(ble_event_t type, uint8_t slot, uint16_t a, uint16_t b);
 typedef void (*ble_log_line_cb_t)(const char *line, void *ctx);
 void ble_central_log_dump(ble_log_line_cb_t cb, void *ctx);
 
-/**
- * Switches for finding out why a Venus D stops answering about 28 s after it connects, which the
- * vendor app does not suffer from. Bits, applied to the NEXT connection:
- *   1  connect with a random (static) own address, as the vendor app's phone does, instead of the
- *      public one
- *   2  ask for an ATT MTU of 512, as the Venus D itself does, instead of 256
- *   4  after connecting, send the three read-only requests the vendor app sends in its first seconds
- *      (0x11 modem version, 0x24 VID, 0x51 vid/xid)
- *   8  send the vendor app's steady polling: 0x03 and 0x0a as 6-byte frames with payload 0x01, one
- *      every 3 s, whatever the web app does
- *  16  replay the vendor app's whole session from a capture (every command, same order and timing)
- *      and drop what the web app sends, so that only the app's traffic reaches the storage
- *  64  keep the data length at the default 27 bytes, as the vendor app's connection does, instead of
- *      letting the controller negotiate up to 251 (log: connect-start shows the suggested length;
- *      gap-event 34 shows what was agreed, as tx octets * 256 + rx octets)
- * Zero is the normal behaviour.
- */
-void ble_central_set_experiment(uint8_t bits);
-uint8_t ble_central_experiment(void);

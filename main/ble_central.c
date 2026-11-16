@@ -19,8 +19,6 @@ static const char *TAG = "ble";
 #define SVC_UUID 0xFF00
 #define TX_UUID  0xFF01
 #define RX_UUID  0xFF02
-// Third characteristic the module exposes; its role is unknown, so it is only read and logged.
-#define AUX_UUID 0xFF06
 
 // Only Marstek devices are of interest, and the advertised name is what identifies them.
 #define NAME_PREFIX "MST_"
@@ -70,19 +68,6 @@ typedef struct {
     bool connect_pending;
     /** Asked for while another slot was still connecting; started when that one is done. */
     bool queued;
-
-    /** Handle of the module's third characteristic (0xFF06), 0 if the device has none. */
-    uint16_t aux_handle;
-    uint8_t aux_props;
-    int64_t aux_read_at_us;
-    /** Mute recovery (see the supervisor at the end of the file). */
-    /** Set once the link was dropped for being mute; cleared with the link. */
-    bool mute_handled;
-    /** When the link came up, and when the browser last wrote without waiting for a reply (a firmware transfer). */
-    int64_t link_up_us;
-    int64_t last_bulk_us;
-    /** The link is being replaced on purpose, before the storage falls silent. */
-    bool planned_swap;    bool supervised;
 } slot_t;
 
 static slot_t s_slots[BLE_MAX_SLOTS];
@@ -100,31 +85,6 @@ static ble_device_t s_scan_results[MAX_SCAN_RESULTS];
 static size_t s_scan_count = 0;
 
 static int on_gap_event_slot(struct ble_gap_event *event, void *arg);
-static void supervisor_start(void);
-static void swap_reconnect_soon(uint8_t slot);
-
-/* ----------------------------------------------------------------------------- experiments */
-
-#define EXP_RANDOM_ADDRESS 1
-#define EXP_MTU_512 2
-#define EXP_APP_READS 4
-#define EXP_APP_HEARTBEAT 8
-#define EXP_APP_REPLAY 16
-#define EXP_SMALL_PACKETS 64
-#define EXP_PLANNED_SWAP 128
-
-static uint8_t s_experiment = 0;
-static bool s_random_address_ready = false;
-
-void ble_central_set_experiment(uint8_t bits)
-{
-    s_experiment = bits;
-}
-
-uint8_t ble_central_experiment(void)
-{
-    return s_experiment;
-}
 
 /* ------------------------------------------------------------------------------------ event log */
 
@@ -174,8 +134,6 @@ static const char *event_name(uint8_t type)
         case BLE_EV_GAP_OTHER:       return "gap-event";
         case BLE_EV_CONN_PARAMS:     return "conn-params";
         case BLE_EV_SUBSCRIBE:       return "subscribe";
-        case BLE_EV_RECOVERY:        return "mute-recovery";
-        case BLE_EV_AUX:             return "ff06";
         default:                     return "?";
     }
 }
@@ -222,30 +180,6 @@ void ble_central_log_dump(ble_log_line_cb_t cb, void *ctx)
                          e->ms / 1000.0, (unsigned) e->slot, event_name(e->type),
                          e->a == 2 ? "write (skipped)" : (e->a ? "write" : "notify"), (unsigned) e->b);
                 break;
-            case BLE_EV_RECOVERY: {
-                static const char *const what[] = {
-                    "mute detected", "probe only", "re-write the notify descriptor",
-                    "notify off, then on", "connection parameter update", "read FF06",
-                    "reconnect", "supervision active", "planned reconnect" };
-                const unsigned step = e->a < 9 ? e->a : 0;
-                snprintf(line, sizeof(line), "%9.3f s  slot %u  %-14s step %u (%s): %s\n",
-                         e->ms / 1000.0, (unsigned) e->slot, event_name(e->type), step, what[step],
-                         e->b == 1 ? "ANSWERED AFTER THIS" : (e->b == 2 ? "link ended" : (step == 7 ? "Venus D recognised" : (step == 8 ? "new link before it falls silent" : "tried"))));
-                break;
-            }
-            case BLE_EV_AUX:
-                if (e->a == 0xF006) {
-                    snprintf(line, sizeof(line), "%9.3f s  slot %u  %-14s found, properties 0x%02x\n",
-                             e->ms / 1000.0, (unsigned) e->slot, event_name(e->type), (unsigned) e->b);
-                } else if (e->a == 0xFFFF) {
-                    snprintf(line, sizeof(line), "%9.3f s  slot %u  %-14s read failed, status %u\n",
-                             e->ms / 1000.0, (unsigned) e->slot, event_name(e->type), (unsigned) e->b);
-                } else {
-                    snprintf(line, sizeof(line), "%9.3f s  slot %u  %-14s read: %02x %02x %02x %02x\n",
-                             e->ms / 1000.0, (unsigned) e->slot, event_name(e->type), (e->a >> 8) & 0xff,
-                             e->a & 0xff, (e->b >> 8) & 0xff, e->b & 0xff);
-                }
-                break;
             case BLE_EV_GAP_OTHER:
                 snprintf(line, sizeof(line), "%9.3f s  slot %u  %-14s type %u (%u)\n",
                          e->ms / 1000.0, (unsigned) e->slot, event_name(e->type), (unsigned) e->a, (unsigned) e->b);
@@ -275,10 +209,6 @@ static void reset_link(slot_t *s)
 {
     s->conn_handle = BLE_HS_CONN_HANDLE_NONE;
     s->tx_handle = s->rx_handle = s->rx_cccd_handle = s->tx_cccd_handle = 0;
-    s->aux_handle = 0;
-    s->aux_props = 0;
-    s->aux_read_at_us = 0;
-    s->mute_handled = false;
     s->subscribed = s->subscribed_tx = false;
     s->encrypted = false;
     s->ready = false;
@@ -405,175 +335,11 @@ static int on_mtu_exchanged(uint16_t conn_handle, const struct ble_gatt_error *e
     return 0;
 }
 
-/**
- * The vendor app's first requests after connecting, besides the state: modem version, VID and
- * vid/xid, all reads. Frames as seen in a capture of the app.
- */
-static const uint8_t s_app_reads[][8] = {
-    { 0x73, 0x08, 0x23, 0x11, 0x0a, 0x0b, 0x0c, 0x44 },
-    { 0x73, 0x07, 0x23, 0x24, 0x0a, 0x0b, 0x72, 0x00 },
-    { 0x73, 0x06, 0x23, 0x51, 0x0c, 0x0b, 0x00, 0x00 },
-};
-static const uint8_t s_app_reads_len[] = { 8, 7, 6 };
-
-static esp_timer_handle_t s_reads_timer[BLE_MAX_SLOTS];
-static uint8_t s_reads_next[BLE_MAX_SLOTS];
-
-static void send_app_read(void *arg)
-{
-    const uint8_t slot = slot_of(arg);
-    const uint8_t i = s_reads_next[slot];
-    if (i >= sizeof(s_app_reads_len) || !ble_central_is_connected(slot)) {
-        return;
-    }
-
-    ble_central_write(slot, s_app_reads[i], s_app_reads_len[i], false);
-    s_reads_next[slot] = i + 1;
-
-    if (i + 1 < sizeof(s_app_reads_len)) {
-        esp_timer_start_once(s_reads_timer[slot], 700 * 1000);
-    }
-}
-
-/**
- * The vendor app's steady polling, as seen in a capture: the state (0x03) and the setting (0x0a),
- * each as a 6-byte frame with the payload byte 0x01, one of them every 3 s. This bridge and the web
- * app ask with a 5-byte frame without payload, and the Venus D stops answering about 28 s after
- * connecting; the app, which keeps its connection for minutes, never sends that form after the first
- * seconds.
- */
-static const uint8_t s_heartbeat[][6] = {
-    { 0x73, 0x06, 0x23, 0x03, 0x01, 0x54 },
-    { 0x73, 0x06, 0x23, 0x0a, 0x01, 0x5d },
-};
-
-static esp_timer_handle_t s_beat_timer[BLE_MAX_SLOTS];
-static uint8_t s_beat_next[BLE_MAX_SLOTS];
-
-static void send_heartbeat(void *arg)
-{
-    const uint8_t slot = slot_of(arg);
-    if (!(s_experiment & EXP_APP_HEARTBEAT) || !ble_central_is_ready(slot)) {
-        return;
-    }
-
-    ble_central_write_quiet(slot, s_heartbeat[s_beat_next[slot]], sizeof(s_heartbeat[0]), false);
-    s_beat_next[slot] = (uint8_t) ((s_beat_next[slot] + 1) % 2);
-    esp_timer_start_once(s_beat_timer[slot], 3000 * 1000);
-}
-
-static void start_heartbeat(uint8_t slot)
-{
-    if (!s_beat_timer[slot]) {
-        const esp_timer_create_args_t args = { .callback = &send_heartbeat, .arg = arg_of(slot), .name = "ble_beat" };
-        if (esp_timer_create(&args, &s_beat_timer[slot]) != ESP_OK) {
-            return;
-        }
-    }
-    s_beat_next[slot] = 0;
-    esp_timer_stop(s_beat_timer[slot]);
-    esp_timer_start_once(s_beat_timer[slot], 1000 * 1000);
-}
-
-/**
- * The vendor app's whole session, replayed. The sequence and the timing are those of the longest
- * connection in a capture of the app (every write of it): state and setting first, then modem
- * version, VID, the state again, VID, the setting, vid/xid, and from there the state and the setting
- * alternately every 3 s. Delays are from the previous frame, starting at the moment the bridge is
- * ready, which is about when the app wrote its notification descriptor.
- */
-typedef struct {
-    uint16_t delay_ms;
-    uint8_t frame;   /* index into s_replay_frames */
-} replay_step_t;
-
-static const uint8_t s_replay_frames[][8] = {
-    { 0x73, 0x06, 0x23, 0x03, 0x01, 0x54, 0x00, 0x00 },   /* 0: state */
-    { 0x73, 0x06, 0x23, 0x0a, 0x01, 0x5d, 0x00, 0x00 },   /* 1: setting */
-    { 0x73, 0x08, 0x23, 0x11, 0x0a, 0x0b, 0x0c, 0x44 },   /* 2: modem version */
-    { 0x73, 0x07, 0x23, 0x24, 0x0a, 0x0b, 0x72, 0x00 },   /* 3: VID */
-    { 0x73, 0x06, 0x23, 0x51, 0x0c, 0x0b, 0x00, 0x00 },   /* 4: vid/xid */
-};
-static const uint8_t s_replay_len[] = { 6, 6, 8, 7, 6 };
-
-static const replay_step_t s_replay_steps[] = {
-    { 650, 0 }, { 490, 1 }, { 1010, 2 }, { 2000, 0 }, { 1610, 3 }, { 1390, 1 },
-    { 2020, 4 }, { 980, 0 }, { 3000, 1 },
-};
-
-static esp_timer_handle_t s_replay_timer[BLE_MAX_SLOTS];
-static uint16_t s_replay_pos[BLE_MAX_SLOTS];
-
-static void replay_step(void *arg)
-{
-    const uint8_t slot = slot_of(arg);
-    if (!(s_experiment & EXP_APP_REPLAY) || !ble_central_is_ready(slot)) {
-        return;
-    }
-
-    const size_t steps = sizeof(s_replay_steps) / sizeof(s_replay_steps[0]);
-    const uint16_t pos = s_replay_pos[slot];
-    uint8_t frame;
-    uint32_t next_ms;
-
-    if (pos < steps) {
-        frame = s_replay_steps[pos].frame;
-    } else {
-        // Steady state: the state and the setting in turn, every 3 s, the state first.
-        frame = (uint8_t) ((pos - steps) % 2 == 0 ? 0 : 1);
-    }
-    ble_central_write(slot, s_replay_frames[frame], s_replay_len[frame], false);
-
-    s_replay_pos[slot] = pos + 1;
-    next_ms = (pos + 1 < steps) ? s_replay_steps[pos + 1].delay_ms : 3000;
-    esp_timer_start_once(s_replay_timer[slot], (uint64_t) next_ms * 1000);
-}
-
-static void start_replay(uint8_t slot)
-{
-    if (!s_replay_timer[slot]) {
-        const esp_timer_create_args_t args = { .callback = &replay_step, .arg = arg_of(slot), .name = "ble_replay" };
-        if (esp_timer_create(&args, &s_replay_timer[slot]) != ESP_OK) {
-            return;
-        }
-    }
-    s_replay_pos[slot] = 0;
-    esp_timer_stop(s_replay_timer[slot]);
-    esp_timer_start_once(s_replay_timer[slot], (uint64_t) s_replay_steps[0].delay_ms * 1000);
-}
-
-static void start_app_reads(uint8_t slot)
-{
-    if (!s_reads_timer[slot]) {
-        const esp_timer_create_args_t args = { .callback = &send_app_read, .arg = arg_of(slot), .name = "ble_reads" };
-        if (esp_timer_create(&args, &s_reads_timer[slot]) != ESP_OK) {
-            return;
-        }
-    }
-    s_reads_next[slot] = 0;
-    esp_timer_stop(s_reads_timer[slot]);
-    esp_timer_start_once(s_reads_timer[slot], 400 * 1000);
-}
-
 static void announce_connected(uint8_t slot)
 {
     ESP_LOGI(TAG, "[%u] Connected to %s (%s)", slot, s_slots[slot].name, s_slots[slot].address);
     s_slots[slot].ready = true;
     ble_central_log(BLE_EV_READY, slot, 0, 0);
-    if (s_slots[slot].aux_handle) {
-        s_slots[slot].aux_read_at_us = esp_timer_get_time() + 1000 * 1000;
-    }
-    if (s_experiment & EXP_APP_REPLAY) {
-        // The whole session replaces the smaller experiments.
-        start_replay(slot);
-    } else {
-        if (s_experiment & EXP_APP_READS) {
-            start_app_reads(slot);
-        }
-        if (s_experiment & EXP_APP_HEARTBEAT) {
-            start_heartbeat(slot);
-        }
-    }
     set_state(slot, BLE_STATE_CONNECTED, NULL);
 }
 
@@ -747,11 +513,6 @@ static int on_characteristics(uint16_t conn_handle, const struct ble_gatt_error 
         } else if (uuid == RX_UUID) {
             s->rx_handle = chr->val_handle;
             s->rx_props = chr->properties;
-        } else if (uuid == AUX_UUID) {
-            s->aux_handle = chr->val_handle;
-            s->aux_props = chr->properties;
-            // 0xF006 marks "properties of 0xFF06" in the log.
-            ble_central_log(BLE_EV_AUX, slot, 0xF006, chr->properties);
         }
         return 0;
     }
@@ -874,36 +635,21 @@ static esp_err_t start_connect(uint8_t slot)
     ble_gap_disc_cancel();
 
     uint8_t own_addr_type;
-    if (s_experiment & EXP_RANDOM_ADDRESS) {
-        if (!s_random_address_ready) {
-            ble_addr_t addr;
-            if (ble_hs_id_gen_rnd(0, &addr) == 0 && ble_hs_id_set_rnd(addr.val) == 0) {
-                s_random_address_ready = true;
-            }
-        }
-        own_addr_type = s_random_address_ready ? BLE_OWN_ADDR_RANDOM : BLE_OWN_ADDR_PUBLIC;
-    } else if (ble_hs_id_infer_auto(0, &own_addr_type) != 0) {
+    if (ble_hs_id_infer_auto(0, &own_addr_type) != 0) {
         s->connect_pending = false;
         set_state(slot, BLE_STATE_ERROR, "Could not choose a Bluetooth address");
         return ESP_FAIL;
     }
 
-    // The vendor app's connection never extends the data length: the capture has no Data Length
-    // Change event and no command for it, so its packets stay at 27 bytes. This bridge's controller
-    // negotiates up to 251 by itself right after connecting (gap event 34 in the log). The
-    // suggested default is what it starts from.
-    ble_gap_write_sugg_def_data_len((s_experiment & EXP_SMALL_PACKETS) ? 27 : 251,
-                                    (s_experiment & EXP_SMALL_PACKETS) ? 328 : 2120);
-
     // Takes effect when the peer's MTU request is answered, so it has to be set before the link is up.
-    ble_att_set_preferred_mtu((s_experiment & EXP_MTU_512) ? 512 : 256);
+    ble_att_set_preferred_mtu(256);
 
     s_connecting = slot;
     s->connect_pending = true;
     {
         uint16_t sugg_octets = 0, sugg_time = 0;
         ble_gap_read_sugg_def_data_len(&sugg_octets, &sugg_time);
-        ble_central_log(BLE_EV_CONNECT_START, slot, s_experiment, sugg_octets);
+        ble_central_log(BLE_EV_CONNECT_START, slot, 0, sugg_octets);
     }
 
     // The parameters the vendor app asks for (read from a Bluetooth capture of it): 30-50 ms
@@ -978,7 +724,6 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg)
             reset_link(s);
             s->conn_handle = event->connect.conn_handle;
             s->last_notify_us = esp_timer_get_time();
-            s->link_up_us = s->last_notify_us;
             ble_central_log(BLE_EV_LINK_UP, slot, s->conn_handle, 0);
             log_conn_params(slot, s->conn_handle);
 
@@ -1017,13 +762,6 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg)
             ESP_LOGI(TAG, "[%u] Disconnected, reason 0x%x", slot, event->disconnect.reason);
             ble_central_log(BLE_EV_DISCONNECT, slot, (uint16_t) event->disconnect.reason, 0);
             reset_link(s);
-            if (s->planned_swap) {
-                // Replaced on purpose: nobody is told it ended, and the next link starts right away.
-                s->planned_swap = false;
-                swap_reconnect_soon(slot);
-                start_next_queued();
-                break;
-            }
             // The name stays: it came from the binding, and the next connection needs it before
             // the device has been asked (see skip_tx_subscription). A new name is read on connect.
 
@@ -1129,8 +867,6 @@ esp_err_t ble_central_init(ble_notify_cb_t on_notify, ble_state_cb_t on_state)
     for (uint8_t i = 0; i < BLE_MAX_SLOTS; i++) {
         reset_link(&s_slots[i]);
     }
-
-    supervisor_start();
 
     esp_err_t err = nimble_port_init();
     if (err != ESP_OK) {
@@ -1384,9 +1120,6 @@ static esp_err_t write_to_slot(uint8_t slot, const uint8_t *data, size_t len, bo
     }
     slot_t *s = &s_slots[slot];
     s->last_write_us = esp_timer_get_time();
-    if (!with_response && !quiet) {
-        s->last_bulk_us = s->last_write_us;
-    }
 
     // Ask for an acknowledged write only if the characteristic actually offers one. Browsers pick
     // this way too - Chrome's writeValue() looks at the properties and silently uses the
@@ -1442,167 +1175,5 @@ void ble_central_set_device_name(uint8_t slot, const char *name)
     if (valid_slot(slot)) {
         strlcpy(s_slots[slot].name, name, sizeof(s_slots[slot].name));
         strlcpy(s_slots[slot].known_name, name, sizeof(s_slots[slot].known_name));
-    }
-}
-
-
-/* ----------------------------------------------------------------------- mute recovery */
-
-/*
- * The Venus D stops answering about 28 s after the link came up while the link itself stays up.
- * Neither the capture of the vendor app nor the firmware explains it, so this does not try to
- * prevent it: a request that stays unanswered ends the link, and the fresh one that follows works.
- */
-
-#define MUTE_DETECT_US   (3 * 1000 * 1000)
-#define MUTE_LAST_STEP   6
-// Replace the link after this long if nothing is going on, and after this long whatever is going on.
-#define SWAP_EARLIEST_US (18 * 1000 * 1000)
-#define SWAP_LATEST_US   (23 * 1000 * 1000)
-#define SWAP_QUIET_US    (1000 * 1000)
-
-static esp_timer_handle_t s_super_timer;
-
-static bool is_venus_d(const slot_t *s)
-{
-    // The name the device reports over Bluetooth need not be the advertised one, so the name that
-    // counts is the one from the binding or, failing that, from the last scan of its address.
-    const char *known = s->known_name;
-    if (!known[0]) {
-        for (size_t i = 0; i < s_scan_count; i++) {
-            if (strcmp(s_scan_results[i].address, s->address) == 0) {
-                known = s_scan_results[i].name;
-                break;
-            }
-        }
-    }
-    if (known[0]) {
-        return strstr(known, "VNSD") != NULL;
-    }
-
-    // No name known (a binding made without one, no scan since the reboot): the reported name, and
-    // the module's third characteristic (0xFF06) as the other tell.
-    return s->aux_handle || strstr(s->name, "VNSD");
-}
-
-static int on_aux_read(uint16_t conn_handle, const struct ble_gatt_error *error,
-                       struct ble_gatt_attr *attr, void *arg)
-{
-    (void) conn_handle;
-    const uint8_t slot = slot_of(arg);
-    uint8_t buf[4] = { 0 };
-
-    if (error->status == 0 && attr && attr->om) {
-        uint16_t got = 0;
-        ble_hs_mbuf_to_flat(attr->om, buf, sizeof(buf), &got);
-        ble_central_log(BLE_EV_AUX, slot, (uint16_t) ((buf[0] << 8) | buf[1]),
-                        (uint16_t) ((buf[2] << 8) | buf[3]));
-    } else if (error->status != BLE_HS_EDONE) {
-        ble_central_log(BLE_EV_AUX, slot, 0xFFFF, (uint16_t) error->status);
-    }
-    return 0;
-}
-
-static void read_aux(uint8_t slot)
-{
-    slot_t *s = &s_slots[slot];
-    if (s->aux_handle && ble_central_is_connected(slot)) {
-        ble_gattc_read(s->conn_handle, s->aux_handle, on_aux_read, arg_of(slot));
-    }
-}
-
-static void supervise_slot(uint8_t slot, int64_t now)
-{
-    slot_t *s = &s_slots[slot];
-    if (!is_venus_d(s) || !ble_central_is_ready(slot)) {
-        s->mute_handled = false;
-        s->supervised = false;
-        return;
-    }
-
-    if (!s->supervised) {
-        s->supervised = true;
-        ble_central_log(BLE_EV_RECOVERY, slot, 7, 0);
-    }
-
-    s->aux_read_at_us = 0;
-
-    // A firmware transfer writes without waiting for replies: neither a swap nor the mute check
-    // below may touch it.
-    if (now - s->last_bulk_us < 30 * 1000 * 1000 && s->last_bulk_us) {
-        return;
-    }
-
-    // The storage falls silent 26-29 s after a link came up, and a new link always works. So the
-    // link is replaced before that, at a quiet moment if there is one.
-    const int64_t age = now - s->link_up_us;
-    const bool quiet = s->last_notify_us >= s->last_write_us && now - s->last_write_us > SWAP_QUIET_US;
-    if ((s_experiment & EXP_PLANNED_SWAP) && !s->planned_swap &&
-        ((age >= SWAP_EARLIEST_US && quiet) || age >= SWAP_LATEST_US)) {
-        s->planned_swap = true;
-        ble_central_log(BLE_EV_RECOVERY, slot, 8, 0);
-        ble_gap_terminate(s->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        return;
-    }
-
-    // Backup: a request went out and nothing has come back for a while although the link is young
-    // (the silence came early, or the swap did not happen).
-    if (!s->mute_handled && !s->planned_swap && s->last_write_us > s->last_notify_us &&
-        now - s->last_write_us > MUTE_DETECT_US) {
-        s->mute_handled = true;
-        ble_central_log(BLE_EV_RECOVERY, slot, 0, 0);
-        // One read as evidence: an error answer (status 258, "not permitted") proves the module's
-        // own Bluetooth stack is alive and only the data path to the storage's controller is dead.
-        read_aux(slot);
-        ble_central_log(BLE_EV_RECOVERY, slot, MUTE_LAST_STEP, 0);
-        ble_central_log(BLE_EV_RECOVERY, slot, MUTE_LAST_STEP, 2);
-        ble_gap_terminate(s->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-    }
-}
-
-static esp_timer_handle_t s_swap_timer[BLE_MAX_SLOTS];
-
-static void swap_connect(void *arg)
-{
-    const uint8_t slot = slot_of(arg);
-    slot_t *s = &s_slots[slot];
-    if (!s->have_target || s->conn_handle != BLE_HS_CONN_HANDLE_NONE || s->connect_pending) {
-        return;
-    }
-    if (s_connecting >= 0) {
-        s->queued = true;
-        s->connect_pending = true;
-        return;
-    }
-    start_connect(slot);
-}
-
-/** The link just ended on purpose; connect again without waiting for anyone. */
-static void swap_reconnect_soon(uint8_t slot)
-{
-    if (!s_swap_timer[slot]) {
-        const esp_timer_create_args_t args = { .callback = &swap_connect, .arg = arg_of(slot), .name = "ble_swap" };
-        if (esp_timer_create(&args, &s_swap_timer[slot]) != ESP_OK) {
-            return;
-        }
-    }
-    esp_timer_stop(s_swap_timer[slot]);
-    esp_timer_start_once(s_swap_timer[slot], 150 * 1000);
-}
-
-static void supervisor_tick(void *arg)
-{
-    (void) arg;
-    const int64_t now = esp_timer_get_time();
-    for (uint8_t i = 0; i < BLE_MAX_SLOTS; i++) {
-        supervise_slot(i, now);
-    }
-}
-
-static void supervisor_start(void)
-{
-    const esp_timer_create_args_t args = { .callback = &supervisor_tick, .name = "ble_super" };
-    if (esp_timer_create(&args, &s_super_timer) == ESP_OK) {
-        esp_timer_start_periodic(s_super_timer, 1000 * 1000);
     }
 }
