@@ -6,6 +6,14 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.29 — 2026-11-16
+**Beta.** Bridge and web interface only work together. Flash firmware and web image.
+- **The beta switch is back in the update card.** The version drop-down lists stable releases only until
+  "Include beta versions" is turned on, so nobody ends up on a beta by accident. Turning it on asks
+  first and says plainly that betas are for testing, can contain bugs and may not be easy to leave again;
+  while it is on, a warning stays visible. A bridge that already runs a beta has it on.
+- The firmware is unchanged from beta.28.
+
 ## v1.4.0-beta.28 — 2026-11-16
 **Beta.** Bridge and web interface only work together. Flash firmware and web image.
 - **Choose the version in the update card.** A drop-down lists every release, newest first, betas marked,
