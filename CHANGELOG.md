@@ -6,6 +6,15 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.23 — 2026-11-16
+**Beta.** Diagnostic build; bridge and web interface only work together.
+- **Fix: the mute recovery of beta.22 never started.** It looked for "VNSD" in the name the device
+  reports over Bluetooth, which is not the advertised name, so no Venus D was recognised (the log of
+  beta.22 shows no `ff06 read` and no `mute-recovery` line). A Venus D is now recognised by any of: the
+  name from the binding, the name the device reports, the name from the last scan, or the presence of
+  the module's third characteristic 0xFF06. A `mute-recovery` line "step 7 (supervision active)" is
+  logged when a link is being watched.
+
 ## v1.4.0-beta.22 — 2026-11-16
 **Beta.** Diagnostic build; bridge and web interface only work together. For the Venus D, no switch to set.
 - **Mute recovery.** The Venus D stops answering about 28 s after connecting while the link stays up.

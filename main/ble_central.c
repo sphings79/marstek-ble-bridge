@@ -44,6 +44,8 @@ typedef struct {
     uint16_t tx_cccd_handle;
 
     char name[BLE_NAME_MAX];
+    /** Name from the binding or the scan; the device's own GAP name replaces `name` after connecting. */
+    char known_name[BLE_NAME_MAX];
     char address[BLE_ADDR_STR_LEN];
     int8_t rssi;
     uint16_t mtu;
@@ -75,6 +77,7 @@ typedef struct {
     int64_t aux_read_at_us;
     /** Mute recovery (see the supervisor at the end of the file). */
     uint8_t mute_step;
+    bool supervised;
     int64_t mute_next_us;
     int64_t mute_probe_us;
 } slot_t;
@@ -218,11 +221,11 @@ void ble_central_log_dump(ble_log_line_cb_t cb, void *ctx)
                 static const char *const what[] = {
                     "mute detected", "probe only", "re-write the notify descriptor",
                     "notify off, then on", "connection parameter update", "read FF06",
-                    "reconnect" };
-                const unsigned step = e->a < 7 ? e->a : 0;
+                    "reconnect", "supervision active" };
+                const unsigned step = e->a < 8 ? e->a : 0;
                 snprintf(line, sizeof(line), "%9.3f s  slot %u  %-14s step %u (%s): %s\n",
                          e->ms / 1000.0, (unsigned) e->slot, event_name(e->type), step, what[step],
-                         e->b == 1 ? "ANSWERED AFTER THIS" : (e->b == 2 ? "link ended" : "tried"));
+                         e->b == 1 ? "ANSWERED AFTER THIS" : (e->b == 2 ? "link ended" : (step == 7 ? "Venus D recognised" : "tried")));
                 break;
             }
             case BLE_EV_AUX:
@@ -1422,6 +1425,7 @@ void ble_central_set_device_name(uint8_t slot, const char *name)
 {
     if (valid_slot(slot)) {
         strlcpy(s_slots[slot].name, name, sizeof(s_slots[slot].name));
+        strlcpy(s_slots[slot].known_name, name, sizeof(s_slots[slot].known_name));
     }
 }
 
@@ -1444,7 +1448,19 @@ static esp_timer_handle_t s_super_timer;
 
 static bool is_venus_d(const slot_t *s)
 {
-    return strncmp(s->name, "MST_VNSD", 8) == 0;
+    // The device's own GAP name need not be the advertised one, so look at every name there is:
+    // the one it reports, the one from the binding, and the one the last scan saw for its address.
+    // The module's third characteristic (0xFF06) is the other tell: the bridge may know no name at
+    // all (a binding made without one, no scan since the reboot).
+    if (s->aux_handle || strstr(s->name, "VNSD") || strstr(s->known_name, "VNSD")) {
+        return true;
+    }
+    for (size_t i = 0; i < s_scan_count; i++) {
+        if (strcmp(s_scan_results[i].address, s->address) == 0) {
+            return strstr(s_scan_results[i].name, "VNSD") != NULL;
+        }
+    }
+    return false;
 }
 
 static int on_aux_read(uint16_t conn_handle, const struct ble_gatt_error *error,
@@ -1520,7 +1536,13 @@ static void supervise_slot(uint8_t slot, int64_t now)
     slot_t *s = &s_slots[slot];
     if (!is_venus_d(s) || !ble_central_is_ready(slot)) {
         s->mute_step = 0;
+        s->supervised = false;
         return;
+    }
+
+    if (!s->supervised) {
+        s->supervised = true;
+        ble_central_log(BLE_EV_RECOVERY, slot, 7, 0);
     }
 
     if (s->aux_read_at_us && now >= s->aux_read_at_us) {
