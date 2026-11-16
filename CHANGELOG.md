@@ -6,6 +6,16 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.28 — 2026-11-16
+**Beta.** Bridge and web interface only work together. Flash firmware and web image.
+- **Choose the version in the update card.** A drop-down lists every release, newest first, betas marked,
+  instead of the switch for betas: pick one and install it - also an older one, to go back. The newest
+  stable release is preselected, and the newest of all while a beta is running. Going between beta and
+  stable still shows its warning.
+- **ESP32-S3.** The firmware reports its chip and the card installs the image built for it; this beta
+  carries `marstek-ble-bridge-esp32s3.bin` next to the ESP32 image. (Same as v1.3.21 on the stable line.)
+- Merged with v1.3.20 and v1.3.21 (the Venus D connection fix, which this line already had).
+
 ## v1.4.0-beta.27 — 2026-11-16
 **Beta.** Bridge and web interface only work together. Flash firmware and web image.
 - **Cleanup after the Venus D fix.** The Venus D stays connected: the cause was the missing GATT server
