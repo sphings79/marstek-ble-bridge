@@ -6,6 +6,26 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.26 — 2026-11-16
+**Beta.** Bridge and web interface only work together. Flash firmware and web image.
+- **Likely cause of the Venus D going silent after ~28 s found and fixed.** The Venus D sends an ATT
+  "Exchange MTU" request of its own right after connecting (the capture of the vendor app shows it ~20 ms
+  after link-up, answered by the phone within a millisecond). The bridge was built as a pure Bluetooth
+  central without the GATT server, and NimBLE only handles that request when the server is compiled in:
+  without it the request is dropped unanswered. A Bluetooth ATT request that is not answered within 30 s
+  times out, and from then on the link carries no more ATT traffic - the device stops answering and
+  stops notifying while the link itself stays up. That is the 26-29 s seen on every central tried
+  (ESP32, ESP32-S3, NimBLE and Bluedroid; the test builds had the same missing piece). The firmware now
+  builds with the peripheral role and the GATT server (no service is registered, nothing advertises); the
+  firmware is about 16 KB larger.
+- The planned reconnect of beta.25 is off by default: it is the workaround this fix should make
+  unnecessary. `/api/experiment?set=128` turns it back on (values up to 255 are accepted now).
+  The reconnect after 3 s without an answer stays as a backup. If `/api/log` shows no
+  `mute-recovery step 0` for several minutes, the fix works.
+- The write characteristic (0xFF01) is no longer subscribed for a Venus D recognised by the name from
+  the binding (the vendor app only subscribes to 0xFF02). The log no longer reads 0xFF06 one second
+  after connecting. Log lines of the mute recovery are no longer cut off.
+
 ## v1.4.0-beta.25 — 2026-11-16
 **Beta.** Bridge and web interface only work together.
 - **Venus D: the link is replaced before it falls silent.** The log of beta.24 shows the Venus D going

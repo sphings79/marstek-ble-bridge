@@ -13,13 +13,17 @@ CONFIG_HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT=y
 CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 
-# Bluetooth: NimBLE only, and only as a central - the bridge connects out to the storage and
-# never advertises itself.
+# Bluetooth: NimBLE only, and a central - the bridge connects out to the storage and never
+# advertises itself. The peripheral role stays enabled all the same, and with it the GATT server:
+# NimBLE only answers an ATT request from the other side (the Venus D asks for an MTU right after
+# connecting) when the server is built in, and an unanswered request makes that device stop
+# answering anything 30 s later. No service is ever registered and nothing advertises.
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
 CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
-CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_GATT_SERVER=y
 CONFIG_BT_NIMBLE_ROLE_BROADCASTER=n
 
 # The Improv serial reader pulls the UART driver in, and its interrupt code pushed IRAM over the

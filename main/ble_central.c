@@ -111,6 +111,7 @@ static void swap_reconnect_soon(uint8_t slot);
 #define EXP_APP_HEARTBEAT 8
 #define EXP_APP_REPLAY 16
 #define EXP_SMALL_PACKETS 64
+#define EXP_PLANNED_SWAP 128
 
 static uint8_t s_experiment = 0;
 static bool s_random_address_ready = false;
@@ -198,7 +199,7 @@ void ble_central_log_dump(ble_log_line_cb_t cb, void *ctx)
         portEXIT_CRITICAL(&s_log_lock);
 
         const log_entry_t *e = &entry;
-        char line[96];
+        char line[128];
 
         switch (e->type) {
             case BLE_EV_WRITE:
@@ -650,7 +651,7 @@ static int on_tx_descriptors(uint16_t conn_handle, const struct ble_gatt_error *
  */
 static bool skip_tx_subscription(const slot_t *s)
 {
-    return strncmp(s->name, "MST_VNSD", 8) == 0;
+    return strncmp(s->name, "MST_VNSD", 8) == 0 || strstr(s->known_name, "VNSD") != NULL;
 }
 
 static int on_subscribe_done(uint16_t conn_handle, const struct ble_gatt_error *error,
@@ -1524,10 +1525,7 @@ static void supervise_slot(uint8_t slot, int64_t now)
         ble_central_log(BLE_EV_RECOVERY, slot, 7, 0);
     }
 
-    if (s->aux_read_at_us && now >= s->aux_read_at_us) {
-        s->aux_read_at_us = 0;
-        read_aux(slot);
-    }
+    s->aux_read_at_us = 0;
 
     // A firmware transfer writes without waiting for replies: neither a swap nor the mute check
     // below may touch it.
@@ -1539,7 +1537,8 @@ static void supervise_slot(uint8_t slot, int64_t now)
     // link is replaced before that, at a quiet moment if there is one.
     const int64_t age = now - s->link_up_us;
     const bool quiet = s->last_notify_us >= s->last_write_us && now - s->last_write_us > SWAP_QUIET_US;
-    if (!s->planned_swap && ((age >= SWAP_EARLIEST_US && quiet) || age >= SWAP_LATEST_US)) {
+    if ((s_experiment & EXP_PLANNED_SWAP) && !s->planned_swap &&
+        ((age >= SWAP_EARLIEST_US && quiet) || age >= SWAP_LATEST_US)) {
         s->planned_swap = true;
         ble_central_log(BLE_EV_RECOVERY, slot, 8, 0);
         ble_gap_terminate(s->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
