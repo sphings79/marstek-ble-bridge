@@ -385,16 +385,8 @@ static int on_gap_event(struct ble_gap_event *event, void *arg)
 
             ble_gattc_exchange_mtu(s_conn_handle, on_mtu_exchanged, NULL);
 
-            // Browsers and BlueZ negotiate this transparently when a device asks for it, so a
-            // storage that stays silent on an unencrypted link looks perfectly connected from
-            // here. Asking costs nothing if the device does not care.
-            {
-                const int sec = ble_gap_security_initiate(s_conn_handle);
-                if (sec != 0 && sec != BLE_HS_EALREADY) {
-                    ESP_LOGW(TAG, "Could not start pairing: %d", sec);
-                }
-            }
-
+            // No pairing is started. The vendor app never pairs with a storage, and the Venus D
+            // does not answer a pairing request anyway.
             ESP_LOGI(TAG, "Link up, discovering services");
             {
                 const ble_uuid16_t svc = BLE_UUID16_INIT(SVC_UUID);
