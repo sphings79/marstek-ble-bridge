@@ -6,6 +6,20 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.25 — 2026-11-16
+**Beta.** Bridge and web interface only work together.
+- **Venus D: the link is replaced before it falls silent.** The log of beta.24 shows the Venus D going
+  mute 26-29 s after each connection. The bridge now ends the link itself after 18 s at a quiet moment
+  (nothing waiting for an answer for a second), and after 23 s whatever is going on, and connects
+  again 150 ms later, without the usual 5 s wait and without telling the browser that the link ended.
+  The log shows `mute-recovery step 8 (planned reconnect)`. The reconnect after a detected silence
+  (3 s without an answer) stays as a backup.
+- A firmware transfer is left alone: neither the planned reconnect nor the silence check touches a
+  link the browser has written to without waiting for replies in the last 30 s (beta.24 could have
+  cut such a transfer short).
+- The Venus D is recognised by the name from the binding or the last scan; the name the device reports
+  itself (not the advertised one) and the third characteristic only count when no other name is known.
+
 ## v1.4.0-beta.24 — 2026-11-16
 **Beta.** Bridge and web interface only work together.
 - **Venus D: a new connection as soon as it falls silent.** The log of beta.23 shows what the mute is:

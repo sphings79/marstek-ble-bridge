@@ -78,7 +78,11 @@ typedef struct {
     /** Mute recovery (see the supervisor at the end of the file). */
     /** Set once the link was dropped for being mute; cleared with the link. */
     bool mute_handled;
-    bool supervised;
+    /** When the link came up, and when the browser last wrote without waiting for a reply (a firmware transfer). */
+    int64_t link_up_us;
+    int64_t last_bulk_us;
+    /** The link is being replaced on purpose, before the storage falls silent. */
+    bool planned_swap;    bool supervised;
 } slot_t;
 
 static slot_t s_slots[BLE_MAX_SLOTS];
@@ -97,6 +101,7 @@ static size_t s_scan_count = 0;
 
 static int on_gap_event_slot(struct ble_gap_event *event, void *arg);
 static void supervisor_start(void);
+static void swap_reconnect_soon(uint8_t slot);
 
 /* ----------------------------------------------------------------------------- experiments */
 
@@ -220,11 +225,11 @@ void ble_central_log_dump(ble_log_line_cb_t cb, void *ctx)
                 static const char *const what[] = {
                     "mute detected", "probe only", "re-write the notify descriptor",
                     "notify off, then on", "connection parameter update", "read FF06",
-                    "reconnect", "supervision active" };
-                const unsigned step = e->a < 8 ? e->a : 0;
+                    "reconnect", "supervision active", "planned reconnect" };
+                const unsigned step = e->a < 9 ? e->a : 0;
                 snprintf(line, sizeof(line), "%9.3f s  slot %u  %-14s step %u (%s): %s\n",
                          e->ms / 1000.0, (unsigned) e->slot, event_name(e->type), step, what[step],
-                         e->b == 1 ? "ANSWERED AFTER THIS" : (e->b == 2 ? "link ended" : (step == 7 ? "Venus D recognised" : "tried")));
+                         e->b == 1 ? "ANSWERED AFTER THIS" : (e->b == 2 ? "link ended" : (step == 7 ? "Venus D recognised" : (step == 8 ? "new link before it falls silent" : "tried"))));
                 break;
             }
             case BLE_EV_AUX:
@@ -972,6 +977,7 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg)
             reset_link(s);
             s->conn_handle = event->connect.conn_handle;
             s->last_notify_us = esp_timer_get_time();
+            s->link_up_us = s->last_notify_us;
             ble_central_log(BLE_EV_LINK_UP, slot, s->conn_handle, 0);
             log_conn_params(slot, s->conn_handle);
 
@@ -1010,6 +1016,13 @@ static int on_gap_event_slot(struct ble_gap_event *event, void *arg)
             ESP_LOGI(TAG, "[%u] Disconnected, reason 0x%x", slot, event->disconnect.reason);
             ble_central_log(BLE_EV_DISCONNECT, slot, (uint16_t) event->disconnect.reason, 0);
             reset_link(s);
+            if (s->planned_swap) {
+                // Replaced on purpose: nobody is told it ended, and the next link starts right away.
+                s->planned_swap = false;
+                swap_reconnect_soon(slot);
+                start_next_queued();
+                break;
+            }
             // The name stays: it came from the binding, and the next connection needs it before
             // the device has been asked (see skip_tx_subscription). A new name is read on connect.
 
@@ -1370,6 +1383,9 @@ static esp_err_t write_to_slot(uint8_t slot, const uint8_t *data, size_t len, bo
     }
     slot_t *s = &s_slots[slot];
     s->last_write_us = esp_timer_get_time();
+    if (!with_response && !quiet) {
+        s->last_bulk_us = s->last_write_us;
+    }
 
     // Ask for an acknowledged write only if the characteristic actually offers one. Browsers pick
     // this way too - Chrome's writeValue() looks at the properties and silently uses the
@@ -1439,24 +1455,33 @@ void ble_central_set_device_name(uint8_t slot, const char *name)
 
 #define MUTE_DETECT_US   (3 * 1000 * 1000)
 #define MUTE_LAST_STEP   6
+// Replace the link after this long if nothing is going on, and after this long whatever is going on.
+#define SWAP_EARLIEST_US (18 * 1000 * 1000)
+#define SWAP_LATEST_US   (23 * 1000 * 1000)
+#define SWAP_QUIET_US    (1000 * 1000)
 
 static esp_timer_handle_t s_super_timer;
 
 static bool is_venus_d(const slot_t *s)
 {
-    // The device's own GAP name need not be the advertised one, so look at every name there is:
-    // the one it reports, the one from the binding, and the one the last scan saw for its address.
-    // The module's third characteristic (0xFF06) is the other tell: the bridge may know no name at
-    // all (a binding made without one, no scan since the reboot).
-    if (s->aux_handle || strstr(s->name, "VNSD") || strstr(s->known_name, "VNSD")) {
-        return true;
-    }
-    for (size_t i = 0; i < s_scan_count; i++) {
-        if (strcmp(s_scan_results[i].address, s->address) == 0) {
-            return strstr(s_scan_results[i].name, "VNSD") != NULL;
+    // The name the device reports over Bluetooth need not be the advertised one, so the name that
+    // counts is the one from the binding or, failing that, from the last scan of its address.
+    const char *known = s->known_name;
+    if (!known[0]) {
+        for (size_t i = 0; i < s_scan_count; i++) {
+            if (strcmp(s_scan_results[i].address, s->address) == 0) {
+                known = s_scan_results[i].name;
+                break;
+            }
         }
     }
-    return false;
+    if (known[0]) {
+        return strstr(known, "VNSD") != NULL;
+    }
+
+    // No name known (a binding made without one, no scan since the reboot): the reported name, and
+    // the module's third characteristic (0xFF06) as the other tell.
+    return s->aux_handle || strstr(s->name, "VNSD");
 }
 
 static int on_aux_read(uint16_t conn_handle, const struct ble_gatt_error *error,
@@ -1504,11 +1529,27 @@ static void supervise_slot(uint8_t slot, int64_t now)
         read_aux(slot);
     }
 
-    // A request went out and nothing has come back for a while. The ladder of beta.22/23 tried to
-    // wake the device first (notification descriptor again, off and on, connection update, a read of
-    // 0xFF06) and none of it helped, while a new connection always does and is ready again within
-    // a second. So that is what happens now, at once.
-    if (!s->mute_handled && s->last_write_us > s->last_notify_us && now - s->last_write_us > MUTE_DETECT_US) {
+    // A firmware transfer writes without waiting for replies: neither a swap nor the mute check
+    // below may touch it.
+    if (now - s->last_bulk_us < 30 * 1000 * 1000 && s->last_bulk_us) {
+        return;
+    }
+
+    // The storage falls silent 26-29 s after a link came up, and a new link always works. So the
+    // link is replaced before that, at a quiet moment if there is one.
+    const int64_t age = now - s->link_up_us;
+    const bool quiet = s->last_notify_us >= s->last_write_us && now - s->last_write_us > SWAP_QUIET_US;
+    if (!s->planned_swap && ((age >= SWAP_EARLIEST_US && quiet) || age >= SWAP_LATEST_US)) {
+        s->planned_swap = true;
+        ble_central_log(BLE_EV_RECOVERY, slot, 8, 0);
+        ble_gap_terminate(s->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        return;
+    }
+
+    // Backup: a request went out and nothing has come back for a while although the link is young
+    // (the silence came early, or the swap did not happen).
+    if (!s->mute_handled && !s->planned_swap && s->last_write_us > s->last_notify_us &&
+        now - s->last_write_us > MUTE_DETECT_US) {
         s->mute_handled = true;
         ble_central_log(BLE_EV_RECOVERY, slot, 0, 0);
         // One read as evidence: an error answer (status 258, "not permitted") proves the module's
@@ -1518,6 +1559,36 @@ static void supervise_slot(uint8_t slot, int64_t now)
         ble_central_log(BLE_EV_RECOVERY, slot, MUTE_LAST_STEP, 2);
         ble_gap_terminate(s->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
     }
+}
+
+static esp_timer_handle_t s_swap_timer[BLE_MAX_SLOTS];
+
+static void swap_connect(void *arg)
+{
+    const uint8_t slot = slot_of(arg);
+    slot_t *s = &s_slots[slot];
+    if (!s->have_target || s->conn_handle != BLE_HS_CONN_HANDLE_NONE || s->connect_pending) {
+        return;
+    }
+    if (s_connecting >= 0) {
+        s->queued = true;
+        s->connect_pending = true;
+        return;
+    }
+    start_connect(slot);
+}
+
+/** The link just ended on purpose; connect again without waiting for anyone. */
+static void swap_reconnect_soon(uint8_t slot)
+{
+    if (!s_swap_timer[slot]) {
+        const esp_timer_create_args_t args = { .callback = &swap_connect, .arg = arg_of(slot), .name = "ble_swap" };
+        if (esp_timer_create(&args, &s_swap_timer[slot]) != ESP_OK) {
+            return;
+        }
+    }
+    esp_timer_stop(s_swap_timer[slot]);
+    esp_timer_start_once(s_swap_timer[slot], 150 * 1000);
 }
 
 static void supervisor_tick(void *arg)
