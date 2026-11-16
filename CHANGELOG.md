@@ -6,6 +6,20 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.22 — 2026-11-16
+**Beta.** Diagnostic build; bridge and web interface only work together. For the Venus D, no switch to set.
+- **Mute recovery.** The Venus D stops answering about 28 s after connecting while the link stays up.
+  Neither the capture of the vendor app nor its firmware explains it, so the bridge now reacts to it: a
+  request that stays unanswered for 4 s starts a ladder, one step every 3 s, each followed by the app's
+  own state request as a probe: (1) the probe alone, (2) the notification descriptor written again,
+  (3) notifications switched off and on, (4) a connection parameter update, (5) the third characteristic
+  read, (6) a new connection. The log (`/api/log`) shows `mute-recovery` lines: the step that is
+  followed by "ANSWERED AFTER THIS" is what wakes the device. If none does, the link is dropped and the
+  usual reconnect takes over.
+- **Third characteristic 0xFF06.** The module's firmware has a characteristic besides 0xFF01/0xFF02 that
+  nothing here has touched. It is found on connect, its properties are logged (`ff06 found`) and its
+  value is read one second after the bridge is ready and again when the mute is detected (`ff06 read`).
+
 ## v1.4.0-beta.21 — 2026-11-16
 **Beta.** Diagnostic build; bridge and web interface only work together.
 - `/api/experiment` bit 64 (`set=64`): keeps the Bluetooth data length at the default 27 bytes. A capture
