@@ -6,6 +6,12 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.3.22 — 2026-11-19
+- **Fix: the ESP32-S3 image asked for a password on its setup access point.** The S3 build still carried
+  the pre-v1.3.9 access point password, so `Marstek-Bridge-XXXX` was protected instead of open. It is open
+  again, like on the classic ESP32, and needs no password to join.
+- Otherwise the firmware is unchanged from v1.3.21.
+
 ## v1.3.21 — 2026-11-16
 - **ESP32-S3 in the web installer.** The installer now offers an image for the ESP32-S3 as well as for the
   classic ESP32 and picks the right one by itself. The release carries it as
