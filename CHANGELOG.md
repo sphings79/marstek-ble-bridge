@@ -6,6 +6,12 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.3.24 — 2026-11-19
+- **The peak shaving card now warns about its effect on the self-consumption offset.** On the Venus A, D
+  and E 3.0 the firmware stores the threshold as the self-consumption offset too when peak shaving is
+  enabled, and resets the offset to 0 when it is disabled. With a house load below the threshold the
+  storage can then charge from the grid. (Web interface only; the firmware is unchanged from v1.3.23.)
+
 ## v1.3.23 — 2026-11-19
 - **Fix: the web installer now offers the WiFi setup after flashing.** The bridge answered the installer's
   Improv requests with the wrong command numbers (one too high), so the installer never recognised it
