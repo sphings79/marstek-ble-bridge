@@ -48,6 +48,11 @@ strings -a build/marstek-ble-bridge.bin | grep -x "$TAG" >/dev/null || die "Firm
 # The same firmware for the ESP32-S3. Its own build directory and configuration; the web image is shared.
 (. "$IDF_EXPORT" >/dev/null 2>&1; idf.py -B build-s3 -D SDKCONFIG=sdkconfig.s3 build >/dev/null)
 strings -a build-s3/marstek-ble-bridge.bin | grep -x "$TAG" >/dev/null || die "ESP32-S3 image does not carry version $TAG."
+# Complete 4 MB flash images (bootloader, partition table, otadata, app, web) for esptool: write at 0x0.
+# Release assets only; not committed (4 MB each).
+(. "$IDF_EXPORT" >/dev/null 2>&1
+ idf.py merge-bin -o build/marstek-ble-bridge-esp32-full.bin >/dev/null
+ idf.py -B build-s3 -D SDKCONFIG=sdkconfig.s3 merge-bin -o build-s3/marstek-ble-bridge-esp32s3-full.bin >/dev/null)
 trap - ERR
 
 # --- 2. Images, manifest, build info ---
@@ -67,9 +72,11 @@ notes=$(mktemp)
 {
     echo "**[Flash it from your browser](https://sphings79.github.io/marstek-ble-bridge/)** — nothing to install."
     echo
+    echo "Manual flashing: \`*-full.bin\` is the complete image, e.g. \`esptool.py --chip esp32 write_flash 0x0 marstek-ble-bridge-esp32-full.bin\` (ESP32-S3: \`--chip esp32s3\`, file \`...-esp32s3-full.bin\`). The other \`.bin\` files are single partitions."
+    echo
     awk -v t="## $TAG " 'index($0,t)==1{f=1;next} /^## v/{f=0} f' CHANGELOG.md
 } > "$notes"
-gh release create "$TAG" build/marstek-ble-bridge.bin docs/firmware/marstek-ble-bridge-esp32s3.bin build/web.bin --title "$TAG" --notes-file "$notes"
+gh release create "$TAG" build/marstek-ble-bridge.bin docs/firmware/marstek-ble-bridge-esp32s3.bin build/web.bin build/marstek-ble-bridge-esp32-full.bin build-s3/marstek-ble-bridge-esp32s3-full.bin --title "$TAG" --notes-file "$notes"
 rm -f "$notes"
 
 # --- 4. Hosted app ---
