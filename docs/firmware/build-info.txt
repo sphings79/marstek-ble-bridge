@@ -1,2 +1,2 @@
-version=v1.3.23
-control_commit=997f20ba91ea494477e369547364b2c772e37195
+version=v1.3.24
+control_commit=3b7a8b1d4c79233e380b7c3177426db6b846990c
