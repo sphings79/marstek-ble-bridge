@@ -6,6 +6,14 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.3.23 — 2026-11-19
+- **Fix: the web installer now offers the WiFi setup after flashing.** The bridge answered the installer's
+  Improv requests with the wrong command numbers (one too high), so the installer never recognised it
+  and skipped the WiFi dialog - on every board, not only on the S3. The numbers now match.
+- **WiFi setup over the ESP32-S3's own USB port.** The bridge now also listens on the chip's built-in
+  USB port (USB Serial/JTAG), so boards that have only that port can enter their WiFi from the
+  installer as well. The access point `Marstek-Bridge-XXXX` remains the fallback.
+
 ## v1.3.22 — 2026-11-19
 - **Fix: the ESP32-S3 image asked for a password on its setup access point.** The S3 build still carried
   the pre-v1.3.9 access point password, so `Marstek-Bridge-XXXX` was protected instead of open. It is open
