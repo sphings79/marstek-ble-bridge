@@ -8,7 +8,18 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
+#include "soc/soc_caps.h"
 #include "wifi.h"
+
+// The ESP32-S3 can also be flashed and talked to through the USB port that sits on the chip itself
+// (USB Serial/JTAG), which is not UART0. A board with only that port has no other way to hand over
+// its WiFi credentials, so both are listened to.
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+#include "driver/usb_serial_jtag.h"
+#define IMPROV_HAVE_USB 1
+#else
+#define IMPROV_HAVE_USB 0
+#endif
 
 static const char *TAG = "improv";
 
@@ -33,21 +44,50 @@ static const uint8_t HEADER[] = { 'I', 'M', 'P', 'R', 'O', 'V', 0x01 };
 #define ERROR_UNKNOWN_RPC 0x02
 #define ERROR_UNABLE_TO_CONNECT 0x03
 
+// Command numbers as the installer's Improv client sends them. Asking for the current state is what it
+// uses to find out whether a device speaks Improv at all, so a wrong number here means no WiFi dialog.
 #define RPC_WIFI_SETTINGS 0x01
-#define RPC_IDENTIFY 0x02
-#define RPC_GET_CURRENT_STATE 0x03
-#define RPC_GET_DEVICE_INFO 0x04
-#define RPC_GET_WIFI_NETWORKS 0x05
+#define RPC_GET_CURRENT_STATE 0x02
+#define RPC_GET_DEVICE_INFO 0x03
+#define RPC_GET_WIFI_NETWORKS 0x04
 
 // The longest payload worth accepting is a set of credentials: two length-prefixed strings, each
 // bounded by what the WiFi driver takes.
 #define MAX_PAYLOAD 192
 
-static uint8_t s_packet[HEADER_LEN + 2 + MAX_PAYLOAD + 1];
+/** One place packets arrive from and replies go back to. */
+typedef struct {
+    bool usb;
+    size_t have;
+    uint8_t packet[HEADER_LEN + 2 + MAX_PAYLOAD + 1];
+} transport_t;
+
+static transport_t s_uart = { .usb = false };
+#if IMPROV_HAVE_USB
+static transport_t s_usb = { .usb = true };
+static bool s_usb_ready;
+#endif
+
+// The transport whose request is being answered. Only the improv task touches it.
+static transport_t *s_reply = &s_uart;
+
+static void transport_write(const transport_t *transport, const uint8_t *data, size_t len)
+{
+#if IMPROV_HAVE_USB
+    if (transport->usb) {
+        // Nothing listens on the port unless a host has it open, and an unread buffer only fills up.
+        if (s_usb_ready && usb_serial_jtag_is_connected()) {
+            usb_serial_jtag_write_bytes(data, len, pdMS_TO_TICKS(20));
+        }
+        return;
+    }
+#endif
+    uart_write_bytes(IMPROV_UART, data, len);
+}
 
 static void send_packet(uint8_t type, const uint8_t *payload, uint8_t len)
 {
-    uint8_t out[HEADER_LEN + 2 + 255 + 1];
+    uint8_t out[HEADER_LEN + 2 + 255 + 2];
 
     memcpy(out, HEADER, HEADER_LEN);
     out[HEADER_LEN] = type;
@@ -64,11 +104,11 @@ static void send_packet(uint8_t type, const uint8_t *payload, uint8_t len)
     }
     out[body] = checksum;
 
-    uart_write_bytes(IMPROV_UART, out, body + 1);
-
     // The installer looks for a newline between packets; without it the next one can be read as a
     // continuation of this one.
-    uart_write_bytes(IMPROV_UART, "\n", 1);
+    out[body + 1] = '\n';
+
+    transport_write(s_reply, out, body + 2);
 }
 
 static void send_state(uint8_t state)
@@ -221,14 +261,15 @@ static void handle_rpc(const uint8_t *payload, uint8_t len)
         case RPC_GET_CURRENT_STATE:
             send_state(current_state());
             // A device that is already on a network answers with the address as well, so the
-            // installer can offer the link rather than asking for credentials it does not need.
+            // installer can offer the link rather than asking for credentials it does not need. The
+            // result carries the command it answers, which is how the client matches it up.
             if (wifi_is_connected()) {
                 char url[64];
                 snprintf(url, sizeof(url), "http://%s/", wifi_ip());
 
                 uint8_t strings[MAX_PAYLOAD];
                 const uint8_t written = append_string(strings, 0, url);
-                send_rpc_result(RPC_WIFI_SETTINGS, strings, written);
+                send_rpc_result(RPC_GET_CURRENT_STATE, strings, written);
             }
             break;
 
@@ -240,11 +281,6 @@ static void handle_rpc(const uint8_t *payload, uint8_t len)
             handle_wifi_networks();
             break;
 
-        case RPC_IDENTIFY:
-            // Nothing to flash that is not already blinking. Answering at all is what matters.
-            send_error(ERROR_NONE);
-            break;
-
         default:
             send_error(ERROR_UNKNOWN_RPC);
             break;
@@ -252,63 +288,93 @@ static void handle_rpc(const uint8_t *payload, uint8_t len)
 }
 
 /**
- * Collect one packet from the byte stream.
+ * Feed one received byte to a transport's packet reader.
  *
- * The console shares this port, so most of what arrives is not Improv at all. Rather than trying
+ * The console shares the UART, so most of what arrives there is not Improv at all. Rather than trying
  * to tell the two apart, the reader simply hunts for the header and drops anything that does not
  * checksum - log noise fails that test on its own.
  */
+static void feed(transport_t *transport, uint8_t byte)
+{
+    uint8_t *packet = transport->packet;
+    size_t have = transport->have;
+
+    if (have < HEADER_LEN) {
+        if (byte == HEADER[have]) {
+            packet[have++] = byte;
+        } else {
+            // Restart, but allow the byte that broke the run to begin a new one.
+            have = (byte == HEADER[0]) ? 1 : 0;
+            packet[0] = byte;
+        }
+        transport->have = have;
+        return;
+    }
+
+    packet[have++] = byte;
+
+    if (have < HEADER_LEN + 2) {
+        transport->have = have;
+        return;
+    }
+
+    const uint8_t type = packet[HEADER_LEN];
+    const uint8_t len = packet[HEADER_LEN + 1];
+
+    if (len > MAX_PAYLOAD) {
+        transport->have = 0;
+        return;
+    }
+
+    if (have < HEADER_LEN + 2 + (size_t) len + 1) {
+        transport->have = have;
+        return;
+    }
+
+    uint8_t checksum = 0;
+    for (size_t i = 0; i < have - 1; i++) {
+        checksum += packet[i];
+    }
+
+    if (checksum == packet[have - 1] && type == TYPE_RPC) {
+        s_reply = transport;
+        handle_rpc(packet + HEADER_LEN + 2, len);
+    }
+
+    transport->have = 0;
+}
+
 static void improv_task(void *arg)
 {
     (void) arg;
 
-    size_t have = 0;
+    // Announced unprompted, because the installer may already be listening by the time the first
+    // boot gets here.
+    s_reply = &s_uart;
+    send_state(current_state());
+#if IMPROV_HAVE_USB
+    if (s_usb_ready) {
+        s_reply = &s_usb;
+        send_state(current_state());
+    }
+#endif
 
     while (true) {
         uint8_t byte;
-        if (uart_read_bytes(IMPROV_UART, &byte, 1, portMAX_DELAY) != 1) {
-            continue;
+
+#if IMPROV_HAVE_USB
+        // Two sources and no way to wait on both at once, so the UART is polled briefly.
+        if (uart_read_bytes(IMPROV_UART, &byte, 1, pdMS_TO_TICKS(10)) == 1) {
+            feed(&s_uart, byte);
         }
-
-        if (have < HEADER_LEN) {
-            if (byte == HEADER[have]) {
-                s_packet[have++] = byte;
-            } else {
-                // Restart, but allow the byte that broke the run to begin a new one.
-                have = (byte == HEADER[0]) ? 1 : 0;
-                s_packet[0] = byte;
-            }
-            continue;
+        while (s_usb_ready && usb_serial_jtag_read_bytes(&byte, 1, 0) == 1) {
+            feed(&s_usb, byte);
         }
-
-        s_packet[have++] = byte;
-
-        if (have < HEADER_LEN + 2) {
-            continue;
+#else
+        if (uart_read_bytes(IMPROV_UART, &byte, 1, portMAX_DELAY) == 1) {
+            feed(&s_uart, byte);
         }
-
-        const uint8_t type = s_packet[HEADER_LEN];
-        const uint8_t len = s_packet[HEADER_LEN + 1];
-
-        if (len > MAX_PAYLOAD) {
-            have = 0;
-            continue;
-        }
-
-        if (have < HEADER_LEN + 2 + (size_t) len + 1) {
-            continue;
-        }
-
-        uint8_t checksum = 0;
-        for (size_t i = 0; i < have - 1; i++) {
-            checksum += s_packet[i];
-        }
-
-        if (checksum == s_packet[have - 1] && type == TYPE_RPC) {
-            handle_rpc(s_packet + HEADER_LEN + 2, len);
-        }
-
-        have = 0;
+#endif
     }
 }
 
@@ -331,14 +397,20 @@ esp_err_t improv_start(void)
 
     uart_param_config(IMPROV_UART, &config);
 
+#if IMPROV_HAVE_USB
+    usb_serial_jtag_driver_config_t usb_config = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    err = usb_serial_jtag_driver_install(&usb_config);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "No provisioning over the chip's USB port: %s", esp_err_to_name(err));
+    } else {
+        s_usb_ready = true;
+    }
+#endif
+
     if (xTaskCreate(improv_task, "improv", 4096, NULL, 4, NULL) != pdPASS) {
         uart_driver_delete(IMPROV_UART);
         return ESP_ERR_NO_MEM;
     }
-
-    // Announced unprompted, because the installer may already be listening by the time the first
-    // boot gets here.
-    send_state(current_state());
 
     ESP_LOGI(TAG, "Serial provisioning ready");
     return ESP_OK;

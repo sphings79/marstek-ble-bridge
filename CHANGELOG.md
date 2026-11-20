@@ -287,6 +287,32 @@ other way round. Not yet tested against real storages in several slots.
   If nothing holds the storage, the bridge connects for the command and releases it again shortly
   after. See the README.
 - `/api/diag` now lists every slot and reports the free heap, to judge how many connections fit.
+
+## v1.3.25 — 2026-11-20
+- **Fix: a battery module below 0 °C showed about 6552 °C.** The module temperature was read as an unsigned
+  value, so a reading such as -0.9 °C came out as 6552.7 °C. It is now read as signed. (Web interface only;
+  the firmware is unchanged from v1.3.23.)
+
+## v1.3.24 — 2026-11-19
+- **The peak shaving card now warns about its effect on the self-consumption offset.** On the Venus A, D
+  and E 3.0 the firmware stores the threshold as the self-consumption offset too when peak shaving is
+  enabled, and resets the offset to 0 when it is disabled. With a house load below the threshold the
+  storage can then charge from the grid. (Web interface only; the firmware is unchanged from v1.3.23.)
+
+## v1.3.23 — 2026-11-19
+- **Fix: the web installer now offers the WiFi setup after flashing.** The bridge answered the installer's
+  Improv requests with the wrong command numbers (one too high), so the installer never recognised it
+  and skipped the WiFi dialog - on every board, not only on the S3. The numbers now match.
+- **WiFi setup over the ESP32-S3's own USB port.** The bridge now also listens on the chip's built-in
+  USB port (USB Serial/JTAG), so boards that have only that port can enter their WiFi from the
+  installer as well. The access point `Marstek-Bridge-XXXX` remains the fallback.
+
+## v1.3.22 — 2026-11-19
+- **Fix: the ESP32-S3 image asked for a password on its setup access point.** The S3 build still carried
+  the pre-v1.3.9 access point password, so `Marstek-Bridge-XXXX` was protected instead of open. It is open
+  again, like on the classic ESP32, and needs no password to join.
+- Otherwise the firmware is unchanged from v1.3.21.
+
 ## v1.3.21 — 2026-11-16
 - **ESP32-S3 in the web installer.** The installer now offers an image for the ESP32-S3 as well as for the
   classic ESP32 and picks the right one by itself. The release carries it as
