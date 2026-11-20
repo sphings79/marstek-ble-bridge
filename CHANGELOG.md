@@ -6,6 +6,14 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.30 — 2026-11-20
+**Beta.** Bridge and web interface only work together. Flash firmware and web image.
+- Merges the stable line up to v1.3.25 into the beta.
+- **Fix: a battery module below 0 °C no longer shows about 6552 °C** (web interface).
+- **From v1.3.22 / v1.3.23:** the ESP32-S3 setup access point is open again (it still asked for the old
+  password), and the Improv command numbers are fixed, so the web installer offers the WiFi setup after
+  flashing. The bridge also listens on the ESP32-S3's own USB port for the WiFi setup.
+
 ## v1.4.0-beta.29 — 2026-11-16
 **Beta.** Bridge and web interface only work together. Flash firmware and web image.
 - **The beta switch is back in the update card.** The version drop-down lists stable releases only until
