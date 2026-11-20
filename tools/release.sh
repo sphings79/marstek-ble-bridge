@@ -49,10 +49,10 @@ strings -a build/marstek-ble-bridge.bin | grep -x "$TAG" >/dev/null || die "Firm
 (. "$IDF_EXPORT" >/dev/null 2>&1; idf.py -B build-s3 -D SDKCONFIG=sdkconfig.s3 build >/dev/null)
 strings -a build-s3/marstek-ble-bridge.bin | grep -x "$TAG" >/dev/null || die "ESP32-S3 image does not carry version $TAG."
 # Complete 4 MB flash images (bootloader, partition table, otadata, app, web) for esptool: write at 0x0.
-# Release assets only; not committed (4 MB each).
+# Release assets only; not committed (4 MB each). Absolute output paths: merge-bin runs inside the build directory.
 (. "$IDF_EXPORT" >/dev/null 2>&1
- idf.py merge-bin -o build/marstek-ble-bridge-esp32-full.bin >/dev/null
- idf.py -B build-s3 -D SDKCONFIG=sdkconfig.s3 merge-bin -o build-s3/marstek-ble-bridge-esp32s3-full.bin >/dev/null)
+ idf.py merge-bin -o "$BRIDGE_DIR/build/marstek-ble-bridge-esp32-full.bin" >/dev/null
+ idf.py -B build-s3 -D SDKCONFIG=sdkconfig.s3 merge-bin -o "$BRIDGE_DIR/build-s3/marstek-ble-bridge-esp32s3-full.bin" >/dev/null)
 trap - ERR
 
 # --- 2. Images, manifest, build info ---
