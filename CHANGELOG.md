@@ -6,6 +6,11 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.3.25 — 2026-11-20
+- **Fix: a battery module below 0 °C showed about 6552 °C.** The module temperature was read as an unsigned
+  value, so a reading such as -0.9 °C came out as 6552.7 °C. It is now read as signed. (Web interface only;
+  the firmware is unchanged from v1.3.23.)
+
 ## v1.3.24 — 2026-11-19
 - **The peak shaving card now warns about its effect on the self-consumption offset.** On the Venus A, D
   and E 3.0 the firmware stores the threshold as the self-consumption offset too when peak shaving is
