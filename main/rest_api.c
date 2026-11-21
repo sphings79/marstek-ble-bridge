@@ -501,6 +501,191 @@ static esp_err_t peak_shaving_get(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ------------------------------------------------------- simple settings (token), table driven */
+
+typedef enum { VAL_U16, VAL_I16, VAL_U8, VAL_BOOL, VAL_BOOL_BT } value_kind_t;
+
+typedef struct {
+    const char *uri;         // e.g. "/api/discharge-limit"
+    const char *what;        // name shown as the last command
+    uint8_t cmd;
+    value_kind_t kind;
+    const char *field;       // JSON field carrying the value
+    int min, max;
+    const int *allowed;      // when set, only these values (min/max are then ignored)
+    size_t allowed_count;
+} setting_t;
+
+// Values a firmware accepts for the power class and the work mode; it ignores anything else.
+static const int POWER_CLASSES[] = {600, 800, 1200, 1500, 2200, 2500};
+static const int WORK_MODES[] = {0, 1, 5};   // 0 self-consumption, 1 manual, 5 economy (Venus E 1/2)
+
+static const setting_t SETTINGS[] = {
+    { "/api/discharge-limit",   "discharge-limit",   0x17, VAL_U16,  "power",   0, 2500, NULL, 0 },
+    { "/api/charge-limit",      "charge-limit",      0x16, VAL_U16,  "power",   0, 2500, NULL, 0 },
+    { "/api/power-class",       "power-class",       0x15, VAL_U16,  "power",   0, 0, POWER_CLASSES, 6 },
+    { "/api/depth-of-discharge","depth-of-discharge",0x54, VAL_U8,   "percent", 30, 90, NULL, 0 },
+    { "/api/power-offset",      "power-offset",      0x55, VAL_I16,  "offset",  -2500, 2500, NULL, 0 },
+    { "/api/backup-power",      "backup-power",      0x0F, VAL_BOOL, "enabled", 0, 1, NULL, 0 },
+    { "/api/bluetooth",         "bluetooth",         0x53, VAL_BOOL_BT, "enabled", 0, 1, NULL, 0 },
+    { "/api/led",               "led",               0x59, VAL_BOOL, "enabled", 0, 1, NULL, 0 },
+    { "/api/work-mode",         "work-mode",         0x09, VAL_U8,   "mode",    0, 0, WORK_MODES, 3 },
+};
+#define SETTING_COUNT (sizeof(SETTINGS) / sizeof(SETTINGS[0]))
+
+typedef struct {
+    bool known;
+    int value;
+    int64_t sent_at_us;
+} last_setting_t;
+
+// What was last sent per setting and slot; the storage does not report these back.
+static last_setting_t s_last_setting[SETTING_COUNT][BLE_MAX_SLOTS];
+
+static esp_err_t setting_post(httpd_req_t *req)
+{
+    const setting_t *st = (const setting_t *) req->user_ctx;
+    const size_t index = (size_t) (st - SETTINGS);
+
+    if (!token_guard(req)) {
+        return ESP_OK;
+    }
+
+    char body[160];
+    if (!read_body(req, body, sizeof(body))) {
+        send_error(req, "400 Bad Request", "A small JSON body is required");
+        return ESP_OK;
+    }
+    cJSON *json = cJSON_Parse(body);
+    if (!json) {
+        send_error(req, "400 Bad Request", "Not valid JSON");
+        return ESP_OK;
+    }
+
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(json, st->field);
+    const bool is_bool = st->kind == VAL_BOOL || st->kind == VAL_BOOL_BT;
+    int value = 0;
+    bool valid = false;
+
+    if (is_bool && cJSON_IsBool(item)) {
+        value = cJSON_IsTrue(item) ? 1 : 0;
+        valid = true;
+    } else if (!is_bool && cJSON_IsNumber(item) && item->valuedouble > -100000.0 && item->valuedouble < 100000.0 &&
+               item->valuedouble == (double) (int) item->valuedouble) {
+        value = (int) item->valuedouble;
+        if (st->allowed) {
+            for (size_t i = 0; i < st->allowed_count; i++) {
+                valid |= st->allowed[i] == value;
+            }
+        } else {
+            valid = value >= st->min && value <= st->max;
+        }
+    }
+    if (!valid) {
+        cJSON_Delete(json);
+        char message[96];
+        if (is_bool) {
+            snprintf(message, sizeof(message), "\\\"%s\\\" must be true or false", st->field);
+        } else if (st->allowed) {
+            snprintf(message, sizeof(message), "\\\"%s\\\" is not one of the accepted values", st->field);
+        } else {
+            snprintf(message, sizeof(message), "\\\"%s\\\" must be a whole number from %d to %d", st->field,
+                     st->min, st->max);
+        }
+        send_error(req, "400 Bad Request", message);
+        return ESP_OK;
+    }
+
+    int slot = -1;
+    if (!resolve_slot(req, json, &slot)) {
+        cJSON_Delete(json);
+        return ESP_OK;
+    }
+    cJSON_Delete(json);
+
+    uint8_t payload[2];
+    size_t payload_len = 0;
+    switch (st->kind) {
+        case VAL_U16:
+        case VAL_I16:
+            payload[0] = (uint8_t) (value & 0xff);
+            payload[1] = (uint8_t) ((value >> 8) & 0xff);
+            payload_len = 2;
+            break;
+        case VAL_U8:
+        case VAL_BOOL:
+            payload[0] = (uint8_t) value;
+            payload_len = 1;
+            break;
+        case VAL_BOOL_BT:
+            payload[0] = 0x0a;
+            payload[1] = (uint8_t) value;
+            payload_len = 2;
+            break;
+    }
+
+    uint8_t packet[16];
+    const size_t packet_len = build_packet(st->cmd, payload, payload_len, packet);
+    const esp_err_t err = ws_bridge_command((uint8_t) slot, packet, packet_len, CONNECT_TIMEOUT_MS);
+    record_command(slot, st->what, err);
+    if (!answer_reach_error(req, err)) {
+        return ESP_OK;
+    }
+
+    s_last_setting[index][slot] = (last_setting_t) {
+        .known = true, .value = value, .sent_at_us = esp_timer_get_time(),
+    };
+    ESP_LOGI(TAG, "%s = %d sent to slot %d", st->what, value, slot);
+
+    char reply[128];
+    if (is_bool) {
+        snprintf(reply, sizeof(reply), "{\"ok\":true,\"slot\":%d,\"%s\":%s}", slot, st->field,
+                 value ? "true" : "false");
+    } else {
+        snprintf(reply, sizeof(reply), "{\"ok\":true,\"slot\":%d,\"%s\":%d}", slot, st->field, value);
+    }
+    send_json_status(req, "200 OK", reply);
+    return ESP_OK;
+}
+
+static esp_err_t setting_get(httpd_req_t *req)
+{
+    const setting_t *st = (const setting_t *) req->user_ctx;
+    const size_t index = (size_t) (st - SETTINGS);
+
+    if (!token_guard(req)) {
+        return ESP_OK;
+    }
+
+    // What the bridge last sent; empty again after a restart of the bridge.
+    char body[480];
+    size_t used = (size_t) snprintf(body, sizeof(body), "{\"lastSent\":[");
+    const int64_t now = esp_timer_get_time();
+    const bool is_bool = st->kind == VAL_BOOL || st->kind == VAL_BOOL_BT;
+
+    for (int i = 0; i < BLE_MAX_SLOTS; i++) {
+        const last_setting_t *l = &s_last_setting[index][i];
+        if (!l->known) {
+            used += (size_t) snprintf(body + used, sizeof(body) - used, "%s{\"slot\":%d,\"known\":false}",
+                                      i ? "," : "", i);
+        } else if (is_bool) {
+            used += (size_t) snprintf(body + used, sizeof(body) - used,
+                                      "%s{\"slot\":%d,\"known\":true,\"%s\":%s,\"ageSeconds\":%lld}",
+                                      i ? "," : "", i, st->field, l->value ? "true" : "false",
+                                      (long long) ((now - l->sent_at_us) / 1000000));
+        } else {
+            used += (size_t) snprintf(body + used, sizeof(body) - used,
+                                      "%s{\"slot\":%d,\"known\":true,\"%s\":%d,\"ageSeconds\":%lld}",
+                                      i ? "," : "", i, st->field, l->value,
+                                      (long long) ((now - l->sent_at_us) / 1000000));
+        }
+    }
+    snprintf(body + used, sizeof(body) - used, "]}");
+
+    send_json_status(req, "200 OK", body);
+    return ESP_OK;
+}
+
 /* --------------------------------------------------------- /api/status, /api/connection (token) */
 
 /** Copy a string for use inside a JSON string: anything that would break out of it becomes '_'. */
@@ -797,6 +982,20 @@ esp_err_t rest_api_register_handlers(httpd_handle_t server)
 
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
         esp_err_t err = httpd_register_uri_handler(server, &routes[i]);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+
+    for (size_t i = 0; i < SETTING_COUNT; i++) {
+        const httpd_uri_t post = { .uri = SETTINGS[i].uri, .method = HTTP_POST, .handler = setting_post,
+                                   .user_ctx = (void *) &SETTINGS[i] };
+        const httpd_uri_t get = { .uri = SETTINGS[i].uri, .method = HTTP_GET, .handler = setting_get,
+                                  .user_ctx = (void *) &SETTINGS[i] };
+        esp_err_t err = httpd_register_uri_handler(server, &post);
+        if (err == ESP_OK) {
+            err = httpd_register_uri_handler(server, &get);
+        }
         if (err != ESP_OK) {
             return err;
         }

@@ -183,7 +183,7 @@ esp_err_t web_server_start(void)
     config.keep_alive_count = 3;
     config.stack_size = 8192;
     // Default is 8, and the api routes alone are well past that now.
-    config.max_uri_handlers = 32;
+    config.max_uri_handlers = 48;
 
     httpd_handle_t server = NULL;
     esp_err_t err = httpd_start(&server, &config);

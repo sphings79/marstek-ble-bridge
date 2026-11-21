@@ -6,6 +6,17 @@ each release also carries its full notes on the
 
 Versions apply to the bridge firmware and the web interface it serves, which are released together.
 
+## v1.4.0-beta.31 — 2026-11-21
+**Beta.** Bridge and web interface only work together. Flash firmware and web image.
+- **More settings over REST.** Besides peak shaving, the same API token now sets the maximum discharge
+  and charge power, the power class, the depth of discharge, the self-consumption offset, backup power,
+  Bluetooth, the LED and the work mode: `/api/discharge-limit`, `/api/charge-limit`, `/api/power-class`,
+  `/api/depth-of-discharge`, `/api/power-offset`, `/api/backup-power`, `/api/bluetooth`, `/api/led`,
+  `/api/work-mode`. `POST` sends, `GET` shows what was sent last (the storage does not report these back).
+  See the README. Untested on real storages so far - please report what a storage does with 0 W.
+- The release also carries complete 4 MB images (`marstek-ble-bridge-esp32-full.bin`,
+  `marstek-ble-bridge-esp32s3-full.bin`) for flashing with esptool at 0x0.
+
 ## v1.4.0-beta.30 — 2026-11-20
 **Beta.** Bridge and web interface only work together. Flash firmware and web image.
 - Merges the stable line up to v1.3.25 into the beta.

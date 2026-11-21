@@ -170,6 +170,34 @@ rest_command:
     payload: '{"slot":0,"enabled":{{ enabled }},"power":{{ power }}}'
 ```
 
+### More settings
+
+The same token and the same body style (`slot` or `address` as above) work for the other settings
+the app offers. Each endpoint takes `POST` to send and `GET` to read back what was sent last (the
+storage does not report these settings back, and the list is empty again after a restart of the bridge).
+
+| Endpoint | Body | Accepted |
+|---|---|---|
+| `/api/discharge-limit` | `{"power":0}` | 0-2500 W, maximum discharge power |
+| `/api/charge-limit` | `{"power":2500}` | 0-2500 W, maximum charge power |
+| `/api/power-class` | `{"power":2500}` | 600, 800, 1200, 1500, 2200 or 2500 W; which ones a storage takes depends on the model, it ignores the rest |
+| `/api/depth-of-discharge` | `{"percent":80}` | 30-90 |
+| `/api/power-offset` | `{"offset":0}` | -2500 to 2500 W, the grid power the self-consumption controller aims for |
+| `/api/backup-power` | `{"enabled":true}` | true / false |
+| `/api/bluetooth` | `{"enabled":true}` | true / false - turning it off cuts the bridge's own link, a storage then needs a reset by hand |
+| `/api/led` | `{"enabled":false}` | true / false |
+| `/api/work-mode` | `{"mode":0}` | 0 self-consumption, 1 manual, 5 economy (Venus E 1/2 only) |
+
+```bash
+# switch the discharge off, later back to 2500 W
+curl -X POST http://marstek-bridge.local/api/discharge-limit \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"slot":0,"power":0}'
+```
+
+Values outside the range are refused with `400` before anything is sent. Factory reset, firmware
+update, schedule slots and the CT settings are not offered here.
+
 If nothing holds the storage when a command arrives, the bridge connects for it (up to ~15 s),
 sends it, and lets go again shortly after. With one storage the slot may be left out. Answers:
 `200` sent, `401` token missing or wrong, `429` too many wrong tokens, `404` unknown slot or
